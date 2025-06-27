@@ -1,21 +1,28 @@
-from flask import Flask, request, jsonify, abort
+from flask import Flask, request
 import os
 import requests
 from dotenv import load_dotenv
 import base64
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 load_dotenv()
 
-# Load secrets from .env
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")  # Should be 'medsenseedge'
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")  # Your WhatsApp Bearer token
-PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")  # Your WhatsApp phone number ID
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # Your Google Gemini API key
+# Load env vars
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
+PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+# Init Flask
 app = Flask(__name__)
 
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
+# Init Gemini 2.5 Flash
+llm = ChatGoogleGenerativeAI(
+    model="models/gemini-2.5-flash",
+    google_api_key=GEMINI_API_KEY
+)
 
+# Welcome + disclaimer
 WELCOME_MSG = (
     "👋 Welcome to MedSense AI.\n"
     "Text your symptoms (e.g., 'I have fever and chills') or send an image.\n"
@@ -23,120 +30,87 @@ WELCOME_MSG = (
 )
 
 @app.route("/webhook", methods=["GET", "POST"])
-def whatsapp_webhook():
+def webhook():
     if request.method == "GET":
-        # Verification handshake with Meta
         mode = request.args.get("hub.mode")
         token = request.args.get("hub.verify_token")
         challenge = request.args.get("hub.challenge")
         if mode == "subscribe" and token == VERIFY_TOKEN:
             return challenge, 200
-        else:
-            return "Verification token mismatch", 403
+        return "Token mismatch", 403
 
     if request.method == "POST":
-        # Handle incoming WhatsApp messages
         data = request.get_json()
         try:
             entry = data['entry'][0]['changes'][0]['value']
             messages = entry.get('messages', [])
             if messages:
-                message = messages[0]
-                sender = message['from']
+                msg = messages[0]
+                sender = msg['from']
 
-                # Send welcome message if it's the first message (optional)
-                # You can check a DB or session here for first-time users
-
-                # Text message handling
-                if 'text' in message:
-                    user_msg = message['text']['body'].strip()
-                    if user_msg.lower() == "help":
-                        send_whatsapp_message(sender, "Type your symptoms or send a photo.")
-                    elif user_msg.lower() == "emergency":
-                        send_whatsapp_message(sender, "🚨 This may be urgent. Visit a clinic nearby.")
+                if 'text' in msg:
+                    body = msg['text']['body']
+                    if body.lower() == "help":
+                        send_whatsapp_message(sender, "Type your symptoms or send an image.")
+                    elif body.lower() == "emergency":
+                        send_whatsapp_message(sender, "🚨 This may be urgent. Please visit a clinic immediately.")
                     else:
-                        ai_response = gemini_text_diagnose(user_msg)
-                        send_whatsapp_message(sender, ai_response)
+                        reply = gemini_text_diagnose(body)
+                        send_whatsapp_message(sender, reply)
 
-                # Image message handling
-                elif 'image' in message:
-                    media_id = message['image']['id']
+                elif 'image' in msg:
+                    media_id = msg['image']['id']
                     image_url = get_image_url(media_id)
                     image_base64 = download_and_encode_image(image_url)
-                    ai_response = gemini_image_diagnose(image_base64)
-                    send_whatsapp_message(sender, ai_response)
-
-                # Both text and image (rare in WhatsApp, but if supported)
-                elif 'text' in message and 'image' in message:
-                    # Combine logic as needed
-                    pass
+                    reply = gemini_image_diagnose(image_base64)
+                    send_whatsapp_message(sender, reply)
 
         except Exception as e:
-            print("Error processing message:", e)
+            print("Error:", e)
+        return "OK", 200
 
-        return "EVENT_RECEIVED", 200
-
-
-def gemini_text_diagnose(text):
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "prompt": {
-            "text": f"Diagnose these symptoms and provide a detailed, professional medical response:\n{text}"
-        },
-        "temperature": 0.2,
-        "maxOutputTokens": 512
-    }
-    response = requests.post(f"{GEMINI_API_URL}?key={GEMINI_API_KEY}", json=payload, headers=headers)
-    if response.status_code != 200:
+# TEXT DIAGNOSIS using LangChain + Gemini 2.5 Flash
+def gemini_text_diagnose(symptom_text):
+    try:
+        prompt = f"""You're a helpful AI health assistant. A user says: "{symptom_text}"
+Provide a potential diagnosis, possible causes, and whether they should visit a clinic.
+End your message with a disclaimer: "I am not a doctor. This is an AI-based suggestion."""
+        result = llm.invoke(prompt)
+        return result.content
+    except Exception as e:
+        print("Gemini text error:", e)
         return "Sorry, I'm unable to process your request right now."
-    data = response.json()
+
+# IMAGE DIAGNOSIS
+def gemini_image_diagnose(base64_img):
     try:
-        return data['candidates'][0]['output']
-    except Exception:
-        return "Sorry, I couldn't understand the symptoms."
-
-
-def gemini_image_diagnose(image_base64):
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "prompt": {
-            "text": "Analyze this medical image and provide a detailed diagnosis or observation.",
-            "image": {
-                "mimeType": "image/jpeg",
-                "data": image_base64
-            }
-        },
-        "temperature": 0.2,
-        "maxOutputTokens": 512
-    }
-    response = requests.post(f"{GEMINI_API_URL}?key={GEMINI_API_KEY}", json=payload, headers=headers)
-    if response.status_code != 200:
+        prompt = [
+            {"role": "user", "parts": [
+                {"text": "Please analyze this medical image and describe any visible issues."},
+                {"inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": base64_img
+                }}
+            ]}
+        ]
+        response = llm.invoke(prompt)
+        return response.content
+    except Exception as e:
+        print("Gemini image error:", e)
         return "Sorry, I couldn’t analyze the image."
-    data = response.json()
-    try:
-        return data['candidates'][0]['output']
-    except Exception:
-        return "Sorry, I couldn’t analyze the image."
-
 
 def get_image_url(media_id):
     url = f"https://graph.facebook.com/v19.0/{media_id}"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        raise Exception(f"Failed to get image URL: {response.text}")
-    return response.json()['url']
-
+    res = requests.get(url, headers=headers)
+    return res.json()['url']
 
 def download_and_encode_image(url):
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-    image_response = requests.get(url, headers=headers)
-    if image_response.status_code != 200:
-        raise Exception(f"Failed to download image: {image_response.text}")
-    return base64.b64encode(image_response.content).decode('utf-8')
+    res = requests.get(url, headers=headers)
+    return base64.b64encode(res.content).decode('utf-8')
 
-
-def send_whatsapp_message(recipient_id, message):
+def send_whatsapp_message(recipient, message):
     url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
@@ -144,14 +118,12 @@ def send_whatsapp_message(recipient_id, message):
     }
     payload = {
         "messaging_product": "whatsapp",
-        "to": recipient_id,
+        "to": recipient,
         "type": "text",
         "text": {"body": message}
     }
-    resp = requests.post(url, json=payload, headers=headers)
-    if resp.status_code not in [200, 201]:
-        print(f"Failed to send message: {resp.status_code}, {resp.text}")
-
+    res = requests.post(url, json=payload, headers=headers)
+    print("WhatsApp status:", res.status_code, res.text)
 
 if __name__ == "__main__":
     app.run(port=5000)
