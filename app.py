@@ -177,10 +177,10 @@ def whatsapp_webhook():
                             outbreak_msg = f"🌍 Thank you! I've saved {body.title()} as your country. I'll notify you of any disease outbreaks in your area.\n\nFeel free to ask about symptoms or type 'history' to see past consultations."
                         
                         send_whatsapp_message(sender, outbreak_msg)
-                else:
-                    user_sessions[sender]["text"] = body
+                    else:
+                        user_sessions[sender]["text"] = body
                         reply = handle_partial_input(sender, user_sessions[sender])
-                    send_whatsapp_message(sender, reply)
+                        send_whatsapp_message(sender, reply)
 
             elif 'image' in msg:
                 # Check if new user needs profile setup
@@ -269,7 +269,7 @@ def telegram_webhook():
                     if is_new_user(chat_id):
                         start_profile_setup(chat_id, "telegram")
                     else:
-                    send_telegram_message(chat_id, WELCOME_MSG)
+                        send_telegram_message(chat_id, WELCOME_MSG)
                 elif text.lower() in ["help", "/help"]:
                     send_telegram_message(chat_id, "Type your symptoms or send an image. You can provide text, image, or both. Say 'proceed' when ready for analysis!")
                 elif text.lower() in ["emergency", "/emergency"]:
@@ -310,10 +310,8 @@ def telegram_webhook():
                     
                     # Check if this might be a country name (if no country is saved yet)
                     if not get_user_country(chat_id) and any(keyword in text.lower() for keyword in ['united states', 'usa', 'america', 'india', 'brazil', 'china', 'mexico', 'canada', 'australia', 'uk', 'england', 'france', 'germany', 'spain', 'italy', 'japan', 'korea', 'nigeria', 'south africa', 'egypt', 'pakistan', 'bangladesh', 'indonesia', 'philippines', 'vietnam', 'thailand', 'malaysia', 'singapore', 'turkey', 'iran', 'israel', 'saudi arabia', 'uae', 'qatar', 'kuwait', 'russia', 'ukraine', 'poland', 'netherlands', 'belgium', 'switzerland', 'sweden', 'norway', 'denmark', 'finland', 'argentina', 'chile', 'peru', 'colombia', 'venezuela']):
-                        # This looks like a country name, save it
                         save_user_country(chat_id, text.title(), "telegram")
                         
-                        # Check for disease outbreaks
                         outbreaks = check_disease_outbreaks_for_user(chat_id)
                         if outbreaks:
                             outbreak_msg = f"🌍 Thank you! I've saved {text.title()} as your country.\n\n⚠️ Disease Alert: There are {len(outbreaks)} disease outbreak(s) currently reported in {text.title()}. Stay informed and follow local health guidelines.\n\nFeel free to ask about symptoms or type 'history' to see past consultations."
@@ -321,10 +319,10 @@ def telegram_webhook():
                             outbreak_msg = f"🌍 Thank you! I've saved {text.title()} as your country. I'll notify you of any disease outbreaks in your area.\n\nFeel free to ask about symptoms or type 'history' to see past consultations."
                         
                         send_telegram_message(chat_id, outbreak_msg)
-                else:
-                    user_sessions[chat_id]["text"] = text
+                    else:
+                        user_sessions[chat_id]["text"] = text
                         reply = handle_partial_input(chat_id, user_sessions[chat_id])
-                    send_telegram_message(chat_id, reply)
+                        send_telegram_message(chat_id, reply)
 
             elif "photo" in msg:
                 # Check if new user needs profile setup
