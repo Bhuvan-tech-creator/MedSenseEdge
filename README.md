@@ -76,7 +76,7 @@ User feedback system, detailed medical disclaimers, emergency handling, and secu
 
 **For Users**: Start conversation → Share basic info → Describe symptoms → Upload photos (optional) → Get AI analysis → Find nearby clinics → Provide feedback
 
-**For Developers**: Session-based approach with incremental information gathering and natural conversation flow.
+**For Developers**: Session-based approach with information gathering and natural conversation flow.
 
 ## 🛠️ Commands
 
