@@ -1075,4 +1075,7 @@ if __name__ == "__main__":
             print("❌ Telegram token is invalid or bot is not working")
     else:
         print("❌ TELEGRAM_BOT_TOKEN not found in environment variables")
-    app.run(port=5000, debug=True)
+    
+    # Production configuration for Render
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)

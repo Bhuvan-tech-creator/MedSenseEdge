@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: medsense-ai
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    plan: free
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: WHATSAPP_TOKEN
+        sync: false
+      - key: PHONE_NUMBER_ID
+        sync: false
+      - key: VERIFY_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: NOMINATIM_USER_AGENT
+        value: MedSenseAI/1.0 (deployed-on-render)
+      - key: OVERPASS_API_URL
+        value: https://overpass-api.de/api/interpreter
+      - key: NOMINATIM_API_URL
+        value: https://nominatim.openstreetmap.org 

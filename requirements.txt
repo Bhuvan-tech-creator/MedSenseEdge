@@ -1,6 +1,6 @@
-Flask==2.3.3
+Flask==3.0.0
+requests==2.31.0
+python-dotenv==1.0.0
+langchain-google-genai==1.0.10
+pydantic==2.5.0
 gunicorn==21.2.0
-requests
-langchain==0.1.16
-langchain-google-genai==0.0.7
-python-dotenv
