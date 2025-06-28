@@ -424,11 +424,10 @@ def handle_profile_setup(user_id, text, platform):
                 save_user_profile(user_id, age, None, platform)
             user_sessions[user_id]["profile_step"] = None
             user_sessions[user_id].pop("temp_age", None)
-            message = "✅ Profile saved! You can now start using MedSense AI.\n\n" + WELCOME_MSG
+            message = "✅ Profile saved! You can now start using MedSense AI.\n\n💡 Tip: Mention your country anytime (e.g., 'United States', 'India') to receive disease outbreak alerts in your area.\n\n" + WELCOME_MSG
         else:
             gender = text.lower()
             if gender in ["male", "female", "other", "m", "f"]:
-                # Normalize gender values
                 if gender in ["m", "male"]:
                     gender = "Male"
                 elif gender in ["f", "female"]:
@@ -440,7 +439,7 @@ def handle_profile_setup(user_id, text, platform):
                 save_user_profile(user_id, age, gender, platform)
                 user_sessions[user_id]["profile_step"] = None
                 user_sessions[user_id].pop("temp_age", None)
-                message = f"✅ Thank you! Profile saved (Age: {age}, Gender: {gender}).\n\n" + WELCOME_MSG
+                message = f"✅ Thank you! Profile saved (Age: {age}, Gender: {gender}).\n\n💡 Tip: Mention your country anytime (e.g., 'United States', 'India') to receive disease outbreak alerts in your area.\n\n" + WELCOME_MSG
             else:
                 message = "Please enter Male, Female, Other, or type 'skip':"
     else:
@@ -478,21 +477,14 @@ def process_user_input(user_id, session_data):
     text = session_data.get("text")
     image = session_data.get("image")
     
-    # Check if user has country info for disease outbreak notifications
     user_country = get_user_country(user_id)
     platform = "telegram" if str(user_id).startswith("-") or str(user_id).isdigit() or len(str(user_id)) > 15 else "whatsapp"
     
     if text and image:
-        # Both text and image available - comprehensive analysis
         reply = gemini_combined_diagnose_with_history(str(user_id), text, image)
         user_sessions[user_id] = {"text": None, "image": None, "location": None, "last_activity": datetime.now(), "profile_step": None, "awaiting_location_for_clinics": True}
         
-        # Ask for country if not available
-        if not user_country:
-            country_prompt = generate_language_aware_response(text, "\n\n🌍 To provide disease outbreak notifications, please tell me your country (e.g., 'United States', 'India', 'Brazil'):")
-            reply += country_prompt
-        else:
-            # Check for disease outbreaks
+        if user_country:
             outbreaks = check_disease_outbreaks_for_user(user_id)
             if outbreaks:
                 outbreak_text = generate_language_aware_response(text, f"\n\n⚠️ Disease Alert: There are {len(outbreaks)} disease outbreak(s) reported in {user_country}.")
@@ -500,17 +492,11 @@ def process_user_input(user_id, session_data):
         
         return reply + "\n\n💬 Please provide feedback on this diagnosis by replying 'good' or 'bad' to help improve our service.\n\n📍 Would you like to share your location to get nearby clinic recommendations?"
     elif text and not image:
-        # Text only analysis
         reply = gemini_text_diagnose_with_profile(str(user_id), text)
         save_diagnosis_to_history(user_id, platform, text, reply[:500] + "..." if len(reply) > 500 else reply)
         user_sessions[user_id] = {"text": None, "image": None, "location": None, "last_activity": datetime.now(), "profile_step": None, "awaiting_location_for_clinics": True}
         
-        # Ask for country if not available
-        if not user_country:
-            country_prompt = generate_language_aware_response(text, "\n\n🌍 To provide disease outbreak notifications, please tell me your country (e.g., 'United States', 'India', 'Brazil'):")
-            reply += country_prompt
-        else:
-            # Check for disease outbreaks
+        if user_country:
             outbreaks = check_disease_outbreaks_for_user(user_id)
             if outbreaks:
                 outbreak_text = generate_language_aware_response(text, f"\n\n⚠️ Disease Alert: There are {len(outbreaks)} disease outbreak(s) reported in {user_country}.")
@@ -518,16 +504,11 @@ def process_user_input(user_id, session_data):
         
         return reply + "\n\n💬 Please provide feedback on this diagnosis by replying 'good' or 'bad' to help improve our service.\n\n📍 Would you like to share your location to get nearby clinic recommendations?"
     elif image and not text:
-        # Image only analysis
         reply = gemini_image_diagnose_with_profile(str(user_id), image)
         save_diagnosis_to_history(user_id, platform, "Image analysis only", reply[:500] + "..." if len(reply) > 500 else reply)
         user_sessions[user_id] = {"text": None, "image": None, "location": None, "last_activity": datetime.now(), "profile_step": None, "awaiting_location_for_clinics": True}
         
-        # For image-only, ask for country in English
-        if not user_country:
-            reply += "\n\n🌍 To provide disease outbreak notifications, please tell me your country (e.g., 'United States', 'India', 'Brazil'):"
-        else:
-            # Check for disease outbreaks
+        if user_country:
             outbreaks = check_disease_outbreaks_for_user(user_id)
             if outbreaks:
                 reply += f"\n\n⚠️ Disease Alert: There are {len(outbreaks)} disease outbreak(s) reported in {user_country}."
