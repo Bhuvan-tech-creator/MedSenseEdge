@@ -527,13 +527,11 @@ def get_profile_text(user_id):
     return "\n\nUSER PROFILE: No profile information available"
 
 def get_location_and_clinics_text(location_data):
-    """Get formatted location and nearby clinics information"""
     if not location_data:
         return "\n\nLOCATION: Not provided"
     
     location_text = f"\n\nUSER LOCATION:\n{location_data['address']}"
     
-    # Find nearby clinics
     clinics = find_nearby_clinics(location_data['lat'], location_data['lon'])
     
     if clinics:
@@ -545,150 +543,6 @@ def get_location_and_clinics_text(location_data):
 
     return location_text
 
-# Combined Gemini Analysis with History and Profile
-def gemini_combined_diagnose_with_history(user_id, symptom_text, base64_img):
-    try:
-        from langchain_core.messages import HumanMessage
-        
-        if not base64_img or len(base64_img) < 100:
-            return "Sorry, the image data seems corrupted. Please try sending the image again."
-        
-        history = get_user_history(user_id, days_back=365)
-        profile_text = get_profile_text(user_id)
-        history_text = ""
-        
-        if history:
-            history_text = "\n\nUSER'S MEDICAL HISTORY (Past 12 months):\n"
-            for i, (past_symptoms, past_diagnosis, timestamp, body_part, severity) in enumerate(history[:10], 1):
-                date_str = datetime.fromisoformat(timestamp).strftime("%b %d, %Y")
-                history_text += f"{i}. {date_str}: Symptoms: {past_symptoms} | Diagnosis: {past_diagnosis}\n"
-        else:
-            history_text = "\n\nUSER'S MEDICAL HISTORY: No previous consultations found."
-        
-        message = HumanMessage(
-            content=[
-                {
-                    "type": "text",
-                    "text": f"""You are a helpful AI health assistant. I am providing you with an image, text describing current symptoms, user profile information, and medical history.
-
-CURRENT SYMPTOMS: "{symptom_text}"{profile_text}{history_text}
-
-CRITICAL: Detect the language of the user's symptoms text and respond in EXACTLY the same language. If the user wrote in Spanish, respond in Spanish. If they wrote in French, respond in French, etc.
-
-IMPORTANT: Consider the user's age and gender when providing analysis.
-
-Provide a comprehensive but concise analysis:
-
-1. **Assessment**: Brief summary with confidence level (60-100%)
-2. **Visual Observations**: What you see in the image
-3. **Most Likely Condition**: Primary diagnosis considering age/gender
-4. **Possible Causes**: Relevant to user's demographics
-5. **Home Remedies**: 2-3 simple, safe remedies they can try
-6. **Medical Advice**: Whether to visit clinic and urgency level
-
-KEEP CONCISE: Maximum 600 characters total to avoid overwhelming the user.
-
-End with a medical disclaimer appropriate for the detected language (equivalent to: "I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.")"""
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{base64_img}"
-                    }
-                }
-            ]
-        )
-        
-        result = llm.invoke([message])
-        result_content = result.content if isinstance(result.content, str) else str(result.content)
-        current_diagnosis = result_content[:500] + "..." if len(result_content) > 500 else result_content
-        platform = "telegram" if user_id.startswith("-") or user_id.isdigit() or len(user_id) > 15 else "whatsapp"
-        save_diagnosis_to_history(user_id, platform, symptom_text, current_diagnosis)
-        
-        return result_content
-    except Exception as e:
-        print("Gemini combined analysis with history error:", e)
-        fallback_result = gemini_text_diagnose_with_profile(user_id, symptom_text)
-        return fallback_result + "\n\n(Note: Could not analyze the image, diagnosis based on symptoms only)"
-
-# Gemini Text Only with Profile
-def gemini_text_diagnose_with_profile(user_id, symptom_text):
-    try:
-        profile_text = get_profile_text(user_id)
-        
-        prompt = f"""You're a helpful AI health assistant. A user says: "{symptom_text}"
-
-User Profile Information:{profile_text}
-
-CRITICAL: Detect the language of the user's symptoms text and respond in EXACTLY the same language. If the user wrote in Spanish, respond in Spanish. If they wrote in French, respond in French, etc.
-
-IMPORTANT: Consider the user's age and gender in your analysis.
-
-Provide:
-1. **Assessment**: Brief summary with confidence level (60-100%)
-2. **Most Likely Condition**: Primary diagnosis considering age/gender
-3. **Possible Causes**: Relevant to user's demographics  
-4. **Home Remedies**: 2-3 simple, safe remedies they can try
-5. **Medical Advice**: Whether to visit clinic and urgency level
-
-KEEP CONCISE: Maximum 450 characters total to avoid overwhelming the user.
-
-End with a medical disclaimer appropriate for the detected language (equivalent to: "I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.")"""
-        result = llm.invoke(prompt)
-        return result.content if isinstance(result.content, str) else str(result.content)
-    except Exception as e:
-        print("Gemini text error:", e)
-        return "Sorry, I'm unable to process your request right now."
-
-# Gemini Image Only with Profile
-def gemini_image_diagnose_with_profile(user_id, base64_img):
-    try:
-        from langchain_core.messages import HumanMessage
-        
-        if not base64_img or len(base64_img) < 100:
-            return "Sorry, the image data seems corrupted. Please try sending the image again."
-        
-        profile_text = get_profile_text(user_id)
-        
-        message = HumanMessage(
-            content=[
-                {
-                    "type": "text",
-                    "text": f"""Please analyze this medical image and describe any visible issues, potential conditions, and recommendations.
-
-User Profile Information:{profile_text}
-
-CRITICAL: Since this is an image-only analysis, respond in English by default. However, if the user has previously communicated in another language or if there are any text elements in the image that indicate a different language preference, respond in that language instead.
-
-IMPORTANT: Consider the user's age and gender when analyzing the image.
-
-Provide:
-1. **Visual Observations**: What you see in the image
-2. **Assessment**: Brief summary with confidence level (60-100%)
-3. **Most Likely Condition**: Primary diagnosis considering age/gender
-4. **Home Remedies**: 2-3 simple, safe remedies they can try
-5. **Medical Advice**: Whether to visit clinic and urgency level
-
-KEEP CONCISE: Maximum 450 characters total to avoid overwhelming the user.
-
-End with a medical disclaimer appropriate for the language (equivalent to: "I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.")"""
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{base64_img}"
-                    }
-                }
-            ]
-        )
-        
-        result = llm.invoke([message])
-        return result.content if isinstance(result.content, str) else str(result.content)
-    except Exception as e:
-        print("Gemini image error:", e)
-        return "Sorry, I couldn't analyze the image. Please try sending it again or describe your symptoms in text."
-
-# WhatsApp Helpers
 def get_image_url(media_id):
     url = f"https://graph.facebook.com/v19.0/{media_id}"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
