@@ -2,3 +2,5 @@
 /static
 /templates
 /venv
+/.users.db
+/.messages.db
