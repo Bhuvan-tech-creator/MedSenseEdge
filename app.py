@@ -3,6 +3,8 @@ import os
 import requests
 import base64
 import sqlite3
+import json
+import time
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -17,10 +19,15 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
+# Location service URLs (no API keys needed)
+NOMINATIM_USER_AGENT = os.getenv("NOMINATIM_USER_AGENT", "MedSenseAI/1.0")
+OVERPASS_API_URL = os.getenv("OVERPASS_API_URL", "https://overpass-api.de/api/interpreter")
+NOMINATIM_API_URL = os.getenv("NOMINATIM_API_URL", "https://nominatim.openstreetmap.org")
+
 # Flask App
 app = Flask(__name__)
 
-# Gemini 2.5 Flash LLM Init - Fixed SecretStr type
+# Gemini 2.5 Flash LLM Init
 llm = ChatGoogleGenerativeAI(
     model="models/gemini-2.5-flash",
     api_key=SecretStr(GEMINI_API_KEY) if GEMINI_API_KEY else None
@@ -52,7 +59,10 @@ def init_database():
             diagnosis TEXT NOT NULL,
             timestamp DATETIME NOT NULL,
             body_part TEXT,
-            severity TEXT
+            severity TEXT,
+            location_lat REAL,
+            location_lon REAL,
+            location_address TEXT
         )
     ''')
     
@@ -67,7 +77,6 @@ def init_database():
         )
     ''')
     
-    # Add user profiles table for age and gender
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_profiles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,8 +88,150 @@ def init_database():
         )
     ''')
     
+    # Add user locations table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_locations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
+            address TEXT,
+            timestamp DATETIME NOT NULL,
+            platform TEXT NOT NULL
+        )
+    ''')
+    
     conn.commit()
     conn.close()
+
+def save_user_location(user_id, latitude, longitude, address, platform):
+    try:
+        conn = sqlite3.connect('medsense_history.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO user_locations (user_id, latitude, longitude, address, timestamp, platform)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user_id, latitude, longitude, address, datetime.now(), platform))
+        conn.commit()
+        conn.close()
+        print(f"Saved location for user {user_id}: {latitude}, {longitude}")
+        return True
+    except Exception as e:
+        print(f"Error saving user location: {e}")
+        return False
+
+def get_user_recent_location(user_id, hours_back=24):
+    try:
+        conn = sqlite3.connect('medsense_history.db')
+        cursor = conn.cursor()
+        cutoff_time = datetime.now() - timedelta(hours=hours_back)
+        cursor.execute('''
+            SELECT latitude, longitude, address FROM user_locations 
+            WHERE user_id = ? AND timestamp >= ?
+            ORDER BY timestamp DESC LIMIT 1
+        ''', (user_id, cutoff_time))
+        result = cursor.fetchone()
+        conn.close()
+        if result:
+            return {"lat": result[0], "lon": result[1], "address": result[2]}
+        return None
+    except Exception as e:
+        print(f"Error retrieving user location: {e}")
+        return None
+
+def reverse_geocode(latitude, longitude):
+    """Convert coordinates to human-readable address using Nominatim"""
+    try:
+        url = f"{NOMINATIM_API_URL}/reverse"
+        params = {
+            'lat': latitude,
+            'lon': longitude,
+            'format': 'json',
+            'addressdetails': 1
+        }
+        headers = {'User-Agent': NOMINATIM_USER_AGENT}
+        
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        time.sleep(1)  # Rate limiting for Nominatim
+        
+        if response.status_code == 200:
+            data = response.json()
+            if 'display_name' in data:
+                return data['display_name']
+        return f"Location: {latitude:.4f}, {longitude:.4f}"
+    except Exception as e:
+        print(f"Error in reverse geocoding: {e}")
+        return f"Location: {latitude:.4f}, {longitude:.4f}"
+
+def find_nearby_clinics(latitude, longitude, radius_km=5):
+    """Find nearby medical facilities using Overpass API"""
+    try:
+        # Overpass QL query to find hospitals, clinics, and pharmacies
+        overpass_query = f"""
+        [out:json][timeout:25];
+        (
+          node["amenity"~"^(hospital|clinic|doctors|pharmacy)$"](around:{radius_km*1000},{latitude},{longitude});
+          way["amenity"~"^(hospital|clinic|doctors|pharmacy)$"](around:{radius_km*1000},{latitude},{longitude});
+          relation["amenity"~"^(hospital|clinic|doctors|pharmacy)$"](around:{radius_km*1000},{latitude},{longitude});
+        );
+        out center meta;
+        """
+        
+        response = requests.post(OVERPASS_API_URL, data=overpass_query, timeout=30)
+        
+        if response.status_code == 200:
+            data = response.json()
+            clinics = []
+            
+            for element in data.get('elements', [])[:5]:  # Limit to 5 closest
+                if 'tags' in element:
+                    name = element['tags'].get('name', 'Medical Facility')
+                    amenity = element['tags'].get('amenity', 'clinic')
+                    
+                    # Get coordinates
+                    if element['type'] == 'node':
+                        lat, lon = element['lat'], element['lon']
+                    elif 'center' in element:
+                        lat, lon = element['center']['lat'], element['center']['lon']
+                    else:
+                        continue
+                    
+                    # Calculate approximate distance
+                    distance = calculate_distance(latitude, longitude, lat, lon)
+                    
+                    clinics.append({
+                        'name': name,
+                        'type': amenity,
+                        'distance': round(distance, 2),
+                        'lat': lat,
+                        'lon': lon
+                    })
+            
+            # Sort by distance
+            clinics.sort(key=lambda x: x['distance'])
+            return clinics[:3]  # Return top 3 closest
+        
+        return []
+    except Exception as e:
+        print(f"Error finding nearby clinics: {e}")
+        return []
+
+def calculate_distance(lat1, lon1, lat2, lon2):
+    """Calculate distance between two points using Haversine formula"""
+    import math
+    
+    # Convert latitude and longitude from degrees to radians
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    
+    # Haversine formula
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+    c = 2 * math.asin(math.sqrt(a))
+    
+    # Radius of earth in kilometers
+    r = 6371
+    return c * r
 
 def save_user_profile(user_id, age, gender, platform):
     try:
@@ -120,14 +271,21 @@ def is_new_user(user_id):
     history = get_user_history(user_id)
     return profile is None and len(history) == 0
 
-def save_diagnosis_to_history(user_id, platform, symptoms, diagnosis, body_part=None, severity=None):
+def save_diagnosis_to_history(user_id, platform, symptoms, diagnosis, body_part=None, severity=None, location_data=None):
     try:
         conn = sqlite3.connect('medsense_history.db')
         cursor = conn.cursor()
+        
+        lat, lon, address = None, None, None
+        if location_data:
+            lat = location_data.get('lat')
+            lon = location_data.get('lon')
+            address = location_data.get('address')
+        
         cursor.execute('''
-            INSERT INTO symptom_history (user_id, platform, symptoms, diagnosis, timestamp, body_part, severity)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (user_id, platform, symptoms, diagnosis, datetime.now(), body_part, severity))
+            INSERT INTO symptom_history (user_id, platform, symptoms, diagnosis, timestamp, body_part, severity, location_lat, location_lon, location_address)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (user_id, platform, symptoms, diagnosis, datetime.now(), body_part, severity, lat, lon, address))
         history_id = cursor.lastrowid
         conn.commit()
         conn.close()
@@ -190,7 +348,7 @@ def clear_inactive_sessions():
     inactive_users = [user_id for user_id, session in user_sessions.items() 
                     if session.get('last_activity', datetime.now()) < two_months_ago]
     for user_id in inactive_users:
-        user_sessions[user_id] = {"text": None, "image": None, "last_activity": datetime.now(), "profile_step": None}
+        user_sessions[user_id] = {"text": None, "image": None, "location": None, "last_activity": datetime.now(), "profile_step": None, "awaiting_location_for_clinics": False}
         print(f"Cleared session for inactive user {user_id}")
 
 # Initialize database on startup
@@ -257,7 +415,7 @@ def whatsapp_webhook():
 
             # Initialize session if needed
             if sender not in user_sessions:
-                user_sessions[sender] = {"text": None, "image": None, "last_activity": datetime.now(), "profile_step": None}
+                user_sessions[sender] = {"text": None, "image": None, "location": None, "last_activity": datetime.now(), "profile_step": None, "awaiting_location_for_clinics": False}
             user_sessions[sender]["last_activity"] = datetime.now()
 
             if 'text' in msg:
@@ -288,7 +446,7 @@ def whatsapp_webhook():
                     else:
                         send_whatsapp_message(sender, "No medical history found.")
                 elif body.lower() == "clear":
-                    user_sessions[sender] = {"text": None, "image": None, "last_activity": datetime.now(), "profile_step": None}
+                    user_sessions[sender] = {"text": None, "image": None, "location": None, "last_activity": datetime.now(), "profile_step": None, "awaiting_location_for_clinics": False}
                     send_whatsapp_message(sender, "Session cleared. You can start fresh with new symptoms and images.")
                 elif body.lower() == "proceed":
                     reply = process_user_input(sender, user_sessions[sender])
@@ -329,6 +487,38 @@ def whatsapp_webhook():
                 else:
                     send_whatsapp_message(sender, "Sorry, I couldn't access the image. Please try sending it again.")
 
+            elif 'location' in msg:
+                # Handle location sharing
+                latitude = msg['location']['latitude']
+                longitude = msg['location']['longitude']
+                
+                # Get address from coordinates
+                address = reverse_geocode(latitude, longitude)
+                
+                # Check if we're waiting for location after diagnosis
+                if user_sessions[sender].get("awaiting_location_for_clinics"):
+                    # Provide clinic recommendations only
+                    clinics = find_nearby_clinics(latitude, longitude)
+                    save_user_location(sender, latitude, longitude, address, "whatsapp")
+                    
+                    if clinics:
+                        clinic_text = f"📍 Based on your location ({address}), here are the nearest medical facilities:\n\n"
+                        for i, clinic in enumerate(clinics, 1):
+                            clinic_text += f"{i}. **{clinic['name']}** ({clinic['type'].title()})\n   📍 {clinic['distance']}km away\n\n"
+                        clinic_text += "Visit the most appropriate facility based on your symptoms' urgency.\n\n"
+                        clinic_text += "Feel free to ask about new symptoms or type 'history' to see past consultations."
+                    else:
+                        clinic_text = f"📍 Location received: {address}\n\nI couldn't find specific medical facilities within 5km, but you should visit your nearest clinic or hospital for the symptoms discussed.\n\nFeel free to ask about new symptoms or type 'history' to see past consultations."
+                    
+                    user_sessions[sender]["awaiting_location_for_clinics"] = False
+                    send_whatsapp_message(sender, clinic_text)
+                else:
+                    # Regular location sharing during symptom input
+                    location_data = {"lat": latitude, "lon": longitude, "address": address}
+                    user_sessions[sender]["location"] = location_data
+                    save_user_location(sender, latitude, longitude, address, "whatsapp")
+                    send_whatsapp_message(sender, f"📍 Location received: {address}\n\nNow you can share your symptoms or send an image for analysis!")
+
     except Exception as e:
         print("WhatsApp Error:", e)
     return "OK", 200
@@ -348,7 +538,7 @@ def telegram_webhook():
 
             # Initialize session if needed
             if chat_id not in user_sessions:
-                user_sessions[chat_id] = {"text": None, "image": None, "last_activity": datetime.now(), "profile_step": None}
+                user_sessions[chat_id] = {"text": None, "image": None, "location": None, "last_activity": datetime.now(), "profile_step": None, "awaiting_location_for_clinics": False}
             user_sessions[chat_id]["last_activity"] = datetime.now()
 
             if "text" in msg:
@@ -379,7 +569,7 @@ def telegram_webhook():
                     else:
                         send_telegram_message(chat_id, "No medical history found.")
                 elif text.lower() in ["clear", "/clear"]:
-                    user_sessions[chat_id] = {"text": None, "image": None, "last_activity": datetime.now(), "profile_step": None}
+                    user_sessions[chat_id] = {"text": None, "image": None, "location": None, "last_activity": datetime.now(), "profile_step": None, "awaiting_location_for_clinics": False}
                     send_telegram_message(chat_id, "Session cleared. You can start fresh with new symptoms and images.")
                 elif text.lower() == "proceed":
                     reply = process_user_input(chat_id, user_sessions[chat_id])
@@ -426,6 +616,38 @@ def telegram_webhook():
                         send_telegram_message(chat_id, "Sorry, I couldn't download the image. Please try sending it again.")
                 else:
                     send_telegram_message(chat_id, "Sorry, I couldn't access the image. Please try sending it again.")
+
+            elif "location" in msg:
+                # Handle location sharing
+                latitude = msg["location"]["latitude"]
+                longitude = msg["location"]["longitude"]
+                
+                # Get address from coordinates
+                address = reverse_geocode(latitude, longitude)
+                
+                # Check if we're waiting for location after diagnosis
+                if user_sessions[chat_id].get("awaiting_location_for_clinics"):
+                    # Provide clinic recommendations only
+                    clinics = find_nearby_clinics(latitude, longitude)
+                    save_user_location(chat_id, latitude, longitude, address, "telegram")
+                    
+                    if clinics:
+                        clinic_text = f"📍 Based on your location ({address}), here are the nearest medical facilities:\n\n"
+                        for i, clinic in enumerate(clinics, 1):
+                            clinic_text += f"{i}. **{clinic['name']}** ({clinic['type'].title()})\n   📍 {clinic['distance']}km away\n\n"
+                        clinic_text += "Visit the most appropriate facility based on your symptoms' urgency.\n\n"
+                        clinic_text += "Feel free to ask about new symptoms or type 'history' to see past consultations."
+                    else:
+                        clinic_text = f"📍 Location received: {address}\n\nI couldn't find specific medical facilities within 5km, but you should visit your nearest clinic or hospital for the symptoms discussed.\n\nFeel free to ask about new symptoms or type 'history' to see past consultations."
+                    
+                    user_sessions[chat_id]["awaiting_location_for_clinics"] = False
+                    send_telegram_message(chat_id, clinic_text)
+                else:
+                    # Regular location sharing during symptom input
+                    location_data = {"lat": latitude, "lon": longitude, "address": address}
+                    user_sessions[chat_id]["location"] = location_data
+                    save_user_location(chat_id, latitude, longitude, address, "telegram")
+                    send_telegram_message(chat_id, f"📍 Location received: {address}\n\nNow you can share your symptoms or send an image for analysis!")
 
         return "OK", 200
     except Exception as e:
@@ -504,11 +726,16 @@ def handle_profile_setup(user_id, text, platform):
 def handle_partial_input(user_id, session_data):
     text = session_data.get("text")
     image = session_data.get("image")
+    location = session_data.get("location")
+    
+    location_prompt = ""
+    if location:
+        location_prompt = f"\n📍 Location: {location['address']}"
     
     if text and not image:
-        return f"✅ I've recorded your symptoms: '{text}'\n\n📸 Please send an image of the affected area for a complete analysis, or type 'proceed' if you only want text-based analysis.\n\nType 'clear' to start over or 'history' to see past consultations."
+        return f"✅ I've recorded your symptoms: '{text}'{location_prompt}\n\n📸 Please send an image of the affected area for a complete analysis, or type 'proceed' if you only want text-based analysis.\n\nType 'clear' to start over or 'history' to see past consultations."
     elif image and not text:
-        return f"✅ I've received your image.\n\n📝 Please describe your symptoms in text (e.g., 'I have pain and swelling'), or type 'proceed' if you only want image-based analysis.\n\nType 'clear' to start over or 'history' to see past consultations."
+        return f"✅ I've received your image.{location_prompt}\n\n📝 Please describe your symptoms in text (e.g., 'I have pain and swelling'), or type 'proceed' if you only want image-based analysis.\n\nType 'clear' to start over or 'history' to see past consultations."
     else:
         # Both available - proceed with analysis
         return process_user_input(user_id, session_data)
@@ -521,24 +748,24 @@ def process_user_input(user_id, session_data):
     if text and image:
         # Both text and image available - comprehensive analysis
         reply = gemini_combined_diagnose_with_history(str(user_id), text, image)
-        user_sessions[user_id] = {"text": None, "image": None, "last_activity": datetime.now(), "profile_step": None}
-        return reply + "\n\n💬 Please provide feedback on this diagnosis by replying 'good' or 'bad' to help improve our service."
+        user_sessions[user_id] = {"text": None, "image": None, "location": None, "last_activity": datetime.now(), "profile_step": None, "awaiting_location_for_clinics": True}
+        return reply + "\n\n💬 Please provide feedback on this diagnosis by replying 'good' or 'bad' to help improve our service.\n\n📍 Would you like to share your location to get nearby clinic recommendations?"
     elif text and not image:
         # Text only analysis
         reply = gemini_text_diagnose_with_profile(str(user_id), text)
         # Save text-only diagnosis to history
         platform = "telegram" if str(user_id).startswith("-") or str(user_id).isdigit() or len(str(user_id)) > 15 else "whatsapp"
         save_diagnosis_to_history(user_id, platform, text, reply[:500] + "..." if len(reply) > 500 else reply)
-        user_sessions[user_id] = {"text": None, "image": None, "last_activity": datetime.now(), "profile_step": None}
-        return reply + "\n\n💬 Please provide feedback on this diagnosis by replying 'good' or 'bad' to help improve our service."
+        user_sessions[user_id] = {"text": None, "image": None, "location": None, "last_activity": datetime.now(), "profile_step": None, "awaiting_location_for_clinics": True}
+        return reply + "\n\n💬 Please provide feedback on this diagnosis by replying 'good' or 'bad' to help improve our service.\n\n📍 Would you like to share your location to get nearby clinic recommendations?"
     elif image and not text:
         # Image only analysis
         reply = gemini_image_diagnose_with_profile(str(user_id), image)
         # Save image-only diagnosis to history
         platform = "telegram" if str(user_id).startswith("-") or str(user_id).isdigit() or len(str(user_id)) > 15 else "whatsapp"
         save_diagnosis_to_history(user_id, platform, "Image analysis only", reply[:500] + "..." if len(reply) > 500 else reply)
-        user_sessions[user_id] = {"text": None, "image": None, "last_activity": datetime.now(), "profile_step": None}
-        return reply + "\n\n💬 Please provide feedback on this diagnosis by replying 'good' or 'bad' to help improve our service."
+        user_sessions[user_id] = {"text": None, "image": None, "location": None, "last_activity": datetime.now(), "profile_step": None, "awaiting_location_for_clinics": True}
+        return reply + "\n\n💬 Please provide feedback on this diagnosis by replying 'good' or 'bad' to help improve our service.\n\n📍 Would you like to share your location to get nearby clinic recommendations?"
     else:
         return "Please describe your symptoms or send an image. You can provide text, image, or both! Type 'history' to see past consultations."
 
@@ -550,6 +777,25 @@ def get_profile_text(user_id):
         gender_text = f"Gender: {profile['gender']}" if profile['gender'] else "Gender: Not provided"
         return f"\n\nUSER PROFILE:\n{age_text}\n{gender_text}"
     return "\n\nUSER PROFILE: No profile information available"
+
+def get_location_and_clinics_text(location_data):
+    """Get formatted location and nearby clinics information"""
+    if not location_data:
+        return "\n\nLOCATION: Not provided"
+    
+    location_text = f"\n\nUSER LOCATION:\n{location_data['address']}"
+    
+    # Find nearby clinics
+    clinics = find_nearby_clinics(location_data['lat'], location_data['lon'])
+    
+    if clinics:
+        location_text += "\n\nNEARBY MEDICAL FACILITIES:"
+        for i, clinic in enumerate(clinics, 1):
+            location_text += f"\n{i}. {clinic['name']} ({clinic['type']}) - {clinic['distance']}km away"
+    else:
+        location_text += "\n\nNo nearby medical facilities found within 5km radius."
+    
+    return location_text
 
 # Combined Gemini Analysis with History and Profile
 def gemini_combined_diagnose_with_history(user_id, symptom_text, base64_img):
@@ -579,29 +825,27 @@ def gemini_combined_diagnose_with_history(user_id, symptom_text, base64_img):
 
 CURRENT SYMPTOMS: "{symptom_text}"{profile_text}{history_text}
 
-IMPORTANT: Consider the user's age and gender when providing analysis, as medical conditions can vary significantly by demographic factors.
+IMPORTANT: Consider the user's age and gender when providing analysis.
 
 Provide TWO separate diagnoses:
 
 **DIAGNOSIS 1 - WITHOUT HISTORY:**
-Analyze ONLY the current image, symptoms, and user profile (age/gender), ignoring medical history. Make sure to provide a reasonable diagnosis taking in factors like what's happening in the world right now and how common the diagnosis might be. Keep this diagnosis less than 500 characters long. 
+Analyze ONLY the current image, symptoms, and user profile (age/gender), ignoring medical history. Make sure to give a reasonable diagnosis considering what's happening in the world right now and how common the condition might be. Keep this under 325 characters. 
 
 **DIAGNOSIS 2 - WITH HISTORY CONSIDERATION:**
-Analyze the current image, symptoms, and user profile while considering how the medical history might be relevant. Make sure to provide a reasonable diagnosis taking in factors liek what's happening in the world right now and how common the diagnosis might be. Keep this diagnosis less than 500 characters long. 
+Analyze the current image, symptoms, and user profile while considering how the medical history might be relevant. Make sure to give a reasonable diagnosis considering what's happening in the world right now and how common the condition might be. Keep this under 325 characters. 
 
 For each diagnosis provide:
 1. **Assessment**: Brief summary considering age and gender factors
 2. **Visual Observations**: What you see in the image
 3. **Most Likely Condition**: Primary diagnosis with age/gender considerations
-4. **Confidence Level**: A percentage score of how confident you are on the diagnosis from 1 - 100%
+4. **Confidence Level**: A percentage score from 60%-100%
 5. **Possible Causes**: A potential cause relevant to user's demographics
 6. **Recommendation**: Whether to visit clinic and urgency level
 
-For Diagnosis 2, specifically mention if medical history influences your assessment.
-
 End with: "I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses."
 
-Keep under 1250 characters total."""
+Keep under 750 characters total."""
                 },
                 {
                     "type": "image_url",
@@ -628,20 +872,23 @@ Keep under 1250 characters total."""
 def gemini_text_diagnose_with_profile(user_id, symptom_text):
     try:
         profile_text = get_profile_text(user_id)
+        
         prompt = f"""You're a helpful AI health assistant. A user says: \"{symptom_text}\"
 
 User Profile Information:{profile_text}
 
 Provide a potential diagnosis, possible causes, and whether they should visit a clinic.
-IMPORTANT: Consider the user's age and gender in your analysis, as medical conditions can vary significantly by demographic factors.
+IMPORTANT: Consider the user's age and gender in your analysis.
 
-First, start with a one sentence summary of the diagnosis.
-Then, give a short summary of the symptoms.
-Then, list 1-2 reasonable diagnoses with explanations and confidence levels (percentage score from 1-100%), considering age and gender factors.
-Then, list a potential cause for this condition, relevant to the user's demographic.
-Then, answer whether the user should visit a clinic.
+Provide:
+1. One sentence summary of the diagnosis
+2. Short summary of the symptoms
+3. 1-2 reasonable diagnoses with confidence levels (percentage score from 60%-100%)
+4. A potential cause relevant to the user's demographic
+5. Whether the user should visit a clinic and urgency level
+
 End with: \"I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.\"
-Keep under 750 characters."""
+Keep under 500 characters."""
         result = llm.invoke(prompt)
         return result.content if isinstance(result.content, str) else str(result.content)
     except Exception as e:
@@ -666,16 +913,15 @@ def gemini_image_diagnose_with_profile(user_id, base64_img):
 
 User Profile Information:{profile_text}
 
-IMPORTANT: Consider the user's age and gender when analyzing the image, as medical conditions can vary significantly by demographic factors.
+IMPORTANT: Consider the user's age and gender when analyzing the image.
 
 Provide:
-1. What you observe in the image that is related to medicine and health of the user
-2. Possible conditions based on visual appearance with confidence levels (a percentage score from 1-100%), considering age and gender
+1. What you observe in the image related to health
+2. Possible conditions with confidence levels (percentage score from 60%-100%)
 3. Recommended next steps appropriate for the user's demographic
-4. Disclaimer that this is AI analysis, not medical diagnosis
 
 End with: "I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses."
-Keep response under 750 characters."""
+Keep response under 500 characters."""
                 },
                 {
                     "type": "image_url",
