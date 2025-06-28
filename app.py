@@ -24,6 +24,9 @@ NOMINATIM_USER_AGENT = os.getenv("NOMINATIM_USER_AGENT", "MedSenseAI/1.0")
 OVERPASS_API_URL = os.getenv("OVERPASS_API_URL", "https://overpass-api.de/api/interpreter")
 NOMINATIM_API_URL = os.getenv("NOMINATIM_API_URL", "https://nominatim.openstreetmap.org")
 
+# WHO Disease Outbreak News API
+WHO_DON_API_URL = "https://extranet.who.int/publicemergency/api/events"
+
 # Flask App
 app = Flask(__name__)
 
@@ -98,6 +101,30 @@ def init_database():
             address TEXT,
             timestamp DATETIME NOT NULL,
             platform TEXT NOT NULL
+        )
+    ''')
+    
+    # Add user countries table for disease outbreak notifications
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_countries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT UNIQUE NOT NULL,
+            country TEXT NOT NULL,
+            timestamp DATETIME NOT NULL,
+            platform TEXT NOT NULL
+        )
+    ''')
+    
+    # Add disease outbreak notifications table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS disease_notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            disease_name TEXT NOT NULL,
+            country TEXT NOT NULL,
+            who_event_id TEXT NOT NULL,
+            notification_sent BOOLEAN DEFAULT FALSE,
+            timestamp DATETIME NOT NULL
         )
     ''')
     
@@ -232,6 +259,91 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     # Radius of earth in kilometers
     r = 6371
     return c * r
+
+# WHO Disease Outbreak Functions
+def save_user_country(user_id, country, platform):
+    """Save user's country for disease outbreak notifications"""
+    try:
+        conn = sqlite3.connect('medsense_history.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO user_countries (user_id, country, timestamp, platform)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, country, datetime.now(), platform))
+        conn.commit()
+        conn.close()
+        print(f"Saved country {country} for user {user_id}")
+        return True
+    except Exception as e:
+        print(f"Error saving user country: {e}")
+        return False
+
+def get_user_country(user_id):
+    """Get user's country for disease outbreak checking"""
+    try:
+        conn = sqlite3.connect('medsense_history.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT country FROM user_countries WHERE user_id = ?', (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else None
+    except Exception as e:
+        print(f"Error retrieving user country: {e}")
+        return None
+
+def fetch_who_disease_outbreaks():
+    """Fetch current disease outbreaks from WHO"""
+    try:
+        response = requests.get(WHO_DON_API_URL, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"WHO API returned status code: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"Error fetching WHO disease outbreaks: {e}")
+        return None
+
+def check_disease_outbreaks_for_user(user_id):
+    """Check for disease outbreaks in user's country"""
+    user_country = get_user_country(user_id)
+    if not user_country:
+        return []
+    
+    outbreaks = fetch_who_disease_outbreaks()
+    if not outbreaks:
+        return []
+    
+    relevant_outbreaks = []
+    for event in outbreaks.get('events', []):
+        if user_country.lower() in event.get('location', '').lower():
+            relevant_outbreaks.append({
+                'disease': event.get('disease', 'Unknown'),
+                'location': event.get('location', ''),
+                'date': event.get('date_published', ''),
+                'summary': event.get('summary', '')[:200] + '...' if len(event.get('summary', '')) > 200 else event.get('summary', '')
+            })
+    
+    return relevant_outbreaks
+
+def generate_language_aware_response(user_text, response_template):
+    """Use Gemini to generate a response in the same language as user input"""
+    try:
+        prompt = f"""The user wrote: "{user_text}"
+
+Please respond with this message template but in the EXACT same language that the user used:
+
+"{response_template}"
+
+If the user wrote in English, respond in English. If Spanish, respond in Spanish. If French, respond in French, etc. 
+Keep the same meaning but translate to match the user's language.
+Only return the translated response, nothing else."""
+        
+        result = llm.invoke(prompt)
+        return result.content if isinstance(result.content, str) else str(result.content)
+    except Exception as e:
+        print(f"Language detection error: {e}")
+        return response_template  # Fallback to English
 
 def save_user_profile(user_id, age, gender, platform):
     try:
@@ -464,9 +576,24 @@ def whatsapp_webhook():
                     else:
                         send_whatsapp_message(sender, "No recent diagnosis found to provide feedback for.")
                 else:
-                    user_sessions[sender]["text"] = body
-                    reply = handle_partial_input(sender, user_sessions[sender])
-                    send_whatsapp_message(sender, reply)
+                    # Check if this might be a country name (if no country is saved yet)
+                    if not get_user_country(sender) and any(keyword in body.lower() for keyword in ['united states', 'usa', 'america', 'india', 'brazil', 'china', 'mexico', 'canada', 'australia', 'uk', 'england', 'france', 'germany', 'spain', 'italy', 'japan', 'korea', 'nigeria', 'south africa', 'egypt', 'pakistan', 'bangladesh', 'indonesia', 'philippines', 'vietnam', 'thailand', 'malaysia', 'singapore', 'turkey', 'iran', 'israel', 'saudi arabia', 'uae', 'qatar', 'kuwait', 'russia', 'ukraine', 'poland', 'netherlands', 'belgium', 'switzerland', 'sweden', 'norway', 'denmark', 'finland', 'argentina', 'chile', 'peru', 'colombia', 'venezuela']):
+                        # This looks like a country name, save it
+                        save_user_country(sender, body.title(), "whatsapp")
+                        
+                        # Check for disease outbreaks
+                        outbreaks = check_disease_outbreaks_for_user(sender)
+                        if outbreaks:
+                            outbreak_msg = f"🌍 Thank you! I've saved {body.title()} as your country.\n\n⚠️ Disease Alert: There are {len(outbreaks)} disease outbreak(s) currently reported in {body.title()}. Stay informed and follow local health guidelines.\n\nFeel free to ask about symptoms or type 'history' to see past consultations."
+                        else:
+                            outbreak_msg = f"🌍 Thank you! I've saved {body.title()} as your country. I'll notify you of any disease outbreaks in your area.\n\nFeel free to ask about symptoms or type 'history' to see past consultations."
+                        
+                        send_whatsapp_message(sender, outbreak_msg)
+                    else:
+                        # Regular symptom text
+                        user_sessions[sender]["text"] = body
+                        reply = handle_partial_input(sender, user_sessions[sender])
+                        send_whatsapp_message(sender, reply)
 
             elif 'image' in msg:
                 # Check if new user needs profile setup
@@ -593,10 +720,25 @@ def telegram_webhook():
                     if is_new_user(chat_id) and text.lower() != "skip":
                         start_profile_setup(chat_id, "telegram")
                         return "OK", 200
+                    
+                    # Check if this might be a country name (if no country is saved yet)
+                    if not get_user_country(chat_id) and any(keyword in text.lower() for keyword in ['united states', 'usa', 'america', 'india', 'brazil', 'china', 'mexico', 'canada', 'australia', 'uk', 'england', 'france', 'germany', 'spain', 'italy', 'japan', 'korea', 'nigeria', 'south africa', 'egypt', 'pakistan', 'bangladesh', 'indonesia', 'philippines', 'vietnam', 'thailand', 'malaysia', 'singapore', 'turkey', 'iran', 'israel', 'saudi arabia', 'uae', 'qatar', 'kuwait', 'russia', 'ukraine', 'poland', 'netherlands', 'belgium', 'switzerland', 'sweden', 'norway', 'denmark', 'finland', 'argentina', 'chile', 'peru', 'colombia', 'venezuela']):
+                        # This looks like a country name, save it
+                        save_user_country(chat_id, text.title(), "telegram")
                         
-                    user_sessions[chat_id]["text"] = text
-                    reply = handle_partial_input(chat_id, user_sessions[chat_id])
-                    send_telegram_message(chat_id, reply)
+                        # Check for disease outbreaks
+                        outbreaks = check_disease_outbreaks_for_user(chat_id)
+                        if outbreaks:
+                            outbreak_msg = f"🌍 Thank you! I've saved {text.title()} as your country.\n\n⚠️ Disease Alert: There are {len(outbreaks)} disease outbreak(s) currently reported in {text.title()}. Stay informed and follow local health guidelines.\n\nFeel free to ask about symptoms or type 'history' to see past consultations."
+                        else:
+                            outbreak_msg = f"🌍 Thank you! I've saved {text.title()} as your country. I'll notify you of any disease outbreaks in your area.\n\nFeel free to ask about symptoms or type 'history' to see past consultations."
+                        
+                        send_telegram_message(chat_id, outbreak_msg)
+                    else:
+                        # Regular symptom text
+                        user_sessions[chat_id]["text"] = text
+                        reply = handle_partial_input(chat_id, user_sessions[chat_id])
+                        send_telegram_message(chat_id, reply)
 
             elif "photo" in msg:
                 # Check if new user needs profile setup
@@ -737,8 +879,11 @@ def handle_partial_input(user_id, session_data):
         location_prompt = f"\n📍 Location: {location['address']}"
     
     if text and not image:
-        return f"✅ I've recorded your symptoms: '{text}'{location_prompt}\n\n📸 Please send an image of the affected area for a complete analysis, or type 'proceed' if you only want text-based analysis.\n\nType 'clear' to start over or 'history' to see past consultations."
+        # Generate language-aware response for text-only case
+        template = f"✅ I've recorded your symptoms: '{text}'{location_prompt}\n\n📸 Please send an image of the affected area for a complete analysis, or type 'proceed' if you only want text-based analysis.\n\nType 'clear' to start over or 'history' to see past consultations."
+        return generate_language_aware_response(text, template)
     elif image and not text:
+        # For image-only, ask for text in English (no user text to detect from)
         return f"✅ I've received your image.{location_prompt}\n\n📝 Please describe your symptoms in text (e.g., 'I have pain and swelling'), or type 'proceed' if you only want image-based analysis.\n\nType 'clear' to start over or 'history' to see past consultations."
     else:
         # Both available - proceed with analysis
@@ -749,26 +894,60 @@ def process_user_input(user_id, session_data):
     text = session_data.get("text")
     image = session_data.get("image")
     
+    # Check if user has country info for disease outbreak notifications
+    user_country = get_user_country(user_id)
+    platform = "telegram" if str(user_id).startswith("-") or str(user_id).isdigit() or len(str(user_id)) > 15 else "whatsapp"
+    
     if text and image:
         # Both text and image available - comprehensive analysis
         reply = gemini_combined_diagnose_with_history(str(user_id), text, image)
         user_sessions[user_id] = {"text": None, "image": None, "location": None, "last_activity": datetime.now(), "profile_step": None, "awaiting_location_for_clinics": True}
+        
+        # Ask for country if not available
+        if not user_country:
+            country_prompt = generate_language_aware_response(text, "\n\n🌍 To provide disease outbreak notifications, please tell me your country (e.g., 'United States', 'India', 'Brazil'):")
+            reply += country_prompt
+        else:
+            # Check for disease outbreaks
+            outbreaks = check_disease_outbreaks_for_user(user_id)
+            if outbreaks:
+                outbreak_text = generate_language_aware_response(text, f"\n\n⚠️ Disease Alert: There are {len(outbreaks)} disease outbreak(s) reported in {user_country}.")
+                reply += outbreak_text
+        
         return reply + "\n\n💬 Please provide feedback on this diagnosis by replying 'good' or 'bad' to help improve our service.\n\n📍 Would you like to share your location to get nearby clinic recommendations?"
     elif text and not image:
         # Text only analysis
         reply = gemini_text_diagnose_with_profile(str(user_id), text)
-        # Save text-only diagnosis to history
-        platform = "telegram" if str(user_id).startswith("-") or str(user_id).isdigit() or len(str(user_id)) > 15 else "whatsapp"
         save_diagnosis_to_history(user_id, platform, text, reply[:500] + "..." if len(reply) > 500 else reply)
         user_sessions[user_id] = {"text": None, "image": None, "location": None, "last_activity": datetime.now(), "profile_step": None, "awaiting_location_for_clinics": True}
+        
+        # Ask for country if not available
+        if not user_country:
+            country_prompt = generate_language_aware_response(text, "\n\n🌍 To provide disease outbreak notifications, please tell me your country (e.g., 'United States', 'India', 'Brazil'):")
+            reply += country_prompt
+        else:
+            # Check for disease outbreaks
+            outbreaks = check_disease_outbreaks_for_user(user_id)
+            if outbreaks:
+                outbreak_text = generate_language_aware_response(text, f"\n\n⚠️ Disease Alert: There are {len(outbreaks)} disease outbreak(s) reported in {user_country}.")
+                reply += outbreak_text
+        
         return reply + "\n\n💬 Please provide feedback on this diagnosis by replying 'good' or 'bad' to help improve our service.\n\n📍 Would you like to share your location to get nearby clinic recommendations?"
     elif image and not text:
         # Image only analysis
         reply = gemini_image_diagnose_with_profile(str(user_id), image)
-        # Save image-only diagnosis to history
-        platform = "telegram" if str(user_id).startswith("-") or str(user_id).isdigit() or len(str(user_id)) > 15 else "whatsapp"
         save_diagnosis_to_history(user_id, platform, "Image analysis only", reply[:500] + "..." if len(reply) > 500 else reply)
         user_sessions[user_id] = {"text": None, "image": None, "location": None, "last_activity": datetime.now(), "profile_step": None, "awaiting_location_for_clinics": True}
+        
+        # For image-only, ask for country in English
+        if not user_country:
+            reply += "\n\n🌍 To provide disease outbreak notifications, please tell me your country (e.g., 'United States', 'India', 'Brazil'):"
+        else:
+            # Check for disease outbreaks
+            outbreaks = check_disease_outbreaks_for_user(user_id)
+            if outbreaks:
+                reply += f"\n\n⚠️ Disease Alert: There are {len(outbreaks)} disease outbreak(s) reported in {user_country}."
+        
         return reply + "\n\n💬 Please provide feedback on this diagnosis by replying 'good' or 'bad' to help improve our service.\n\n📍 Would you like to share your location to get nearby clinic recommendations?"
     else:
         return "Please describe your symptoms or send an image. You can provide text, image, or both! Type 'history' to see past consultations."
@@ -833,25 +1012,18 @@ CRITICAL: Detect the language of the user's symptoms text and respond in EXACTLY
 
 IMPORTANT: Consider the user's age and gender when providing analysis.
 
-Provide TWO separate diagnoses:
+Provide a comprehensive but concise analysis:
 
-**DIAGNOSIS 1 - WITHOUT HISTORY:**
-Analyze ONLY the current image, symptoms, and user profile (age/gender), ignoring medical history. Make sure to give a reasonable diagnosis considering what's happening in the world right now and how common the condition might be. Keep this under 325 characters. 
-
-**DIAGNOSIS 2 - WITH HISTORY CONSIDERATION:**
-Analyze the current image, symptoms, and user profile while considering how the medical history might be relevant. Make sure to give a reasonable diagnosis considering what's happening in the world right now and how common the condition might be. Keep this under 325 characters. 
-
-For each diagnosis provide:
-1. **Assessment**: Brief summary considering age and gender factors
+1. **Assessment**: Brief summary with confidence level (60-100%)
 2. **Visual Observations**: What you see in the image
-3. **Most Likely Condition**: Primary diagnosis with age/gender considerations
-4. **Confidence Level**: A percentage score from 60%-100%
-5. **Possible Causes**: A potential cause relevant to user's demographics
-6. **Recommendation**: Whether to visit clinic and urgency level
+3. **Most Likely Condition**: Primary diagnosis considering age/gender
+4. **Possible Causes**: Relevant to user's demographics
+5. **Home Remedies**: 2-3 simple, safe remedies they can try
+6. **Medical Advice**: Whether to visit clinic and urgency level
 
-End with a medical disclaimer appropriate for the detected language (equivalent to: "I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.")
+KEEP CONCISE: Maximum 600 characters total to avoid overwhelming the user.
 
-Keep under 750 characters total."""
+End with a medical disclaimer appropriate for the detected language (equivalent to: "I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.")"""
                 },
                 {
                     "type": "image_url",
@@ -885,18 +1057,18 @@ User Profile Information:{profile_text}
 
 CRITICAL: Detect the language of the user's symptoms text and respond in EXACTLY the same language. If the user wrote in Spanish, respond in Spanish. If they wrote in French, respond in French, etc.
 
-Provide a potential diagnosis, possible causes, and whether they should visit a clinic.
 IMPORTANT: Consider the user's age and gender in your analysis.
 
 Provide:
-1. One sentence summary of the diagnosis
-2. Short summary of the symptoms
-3. 1-2 reasonable diagnoses with confidence levels (percentage score from 60%-100%)
-4. A potential cause relevant to the user's demographic
-5. Whether the user should visit a clinic and urgency level
+1. **Assessment**: Brief summary with confidence level (60-100%)
+2. **Most Likely Condition**: Primary diagnosis considering age/gender
+3. **Possible Causes**: Relevant to user's demographics  
+4. **Home Remedies**: 2-3 simple, safe remedies they can try
+5. **Medical Advice**: Whether to visit clinic and urgency level
 
-End with a medical disclaimer appropriate for the detected language (equivalent to: \"I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.\")
-Keep under 500 characters."""
+KEEP CONCISE: Maximum 450 characters total to avoid overwhelming the user.
+
+End with a medical disclaimer appropriate for the detected language (equivalent to: \"I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.\")"""
         result = llm.invoke(prompt)
         return result.content if isinstance(result.content, str) else str(result.content)
     except Exception as e:
@@ -926,12 +1098,15 @@ CRITICAL: Since this is an image-only analysis, respond in English by default. H
 IMPORTANT: Consider the user's age and gender when analyzing the image.
 
 Provide:
-1. What you observe in the image related to health
-2. Possible conditions with confidence levels (percentage score from 60%-100%)
-3. Recommended next steps appropriate for the user's demographic
+1. **Visual Observations**: What you see in the image
+2. **Assessment**: Brief summary with confidence level (60-100%)
+3. **Most Likely Condition**: Primary diagnosis considering age/gender
+4. **Home Remedies**: 2-3 simple, safe remedies they can try
+5. **Medical Advice**: Whether to visit clinic and urgency level
 
-End with a medical disclaimer appropriate for the language (equivalent to: "I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.")
-Keep response under 500 characters."""
+KEEP CONCISE: Maximum 450 characters total to avoid overwhelming the user.
+
+End with a medical disclaimer appropriate for the language (equivalent to: "I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.")"""
                 },
                 {
                     "type": "image_url",
