@@ -504,7 +504,9 @@ def whatsapp_webhook():
                     if clinics:
                         clinic_text = f"📍 Based on your location ({address}), here are the nearest medical facilities:\n\n"
                         for i, clinic in enumerate(clinics, 1):
-                            clinic_text += f"{i}. **{clinic['name']}** ({clinic['type'].title()})\n   📍 {clinic['distance']}km away\n\n"
+                            # Generate Google Maps link
+                            maps_link = f"https://www.google.com/maps/search/?api=1&query={clinic['lat']},{clinic['lon']}"
+                            clinic_text += f"{i}. **{clinic['name']}** ({clinic['type'].title()})\n   📍 {clinic['distance']}km away\n   🗺️ [Open in Maps]({maps_link})\n\n"
                         clinic_text += "Visit the most appropriate facility based on your symptoms' urgency.\n\n"
                         clinic_text += "Feel free to ask about new symptoms or type 'history' to see past consultations."
                     else:
@@ -634,7 +636,9 @@ def telegram_webhook():
                     if clinics:
                         clinic_text = f"📍 Based on your location ({address}), here are the nearest medical facilities:\n\n"
                         for i, clinic in enumerate(clinics, 1):
-                            clinic_text += f"{i}. **{clinic['name']}** ({clinic['type'].title()})\n   📍 {clinic['distance']}km away\n\n"
+                            # Generate Google Maps link
+                            maps_link = f"https://www.google.com/maps/search/?api=1&query={clinic['lat']},{clinic['lon']}"
+                            clinic_text += f"{i}. **{clinic['name']}** ({clinic['type'].title()})\n   📍 {clinic['distance']}km away\n   🗺️ [Open in Maps]({maps_link})\n\n"
                         clinic_text += "Visit the most appropriate facility based on your symptoms' urgency.\n\n"
                         clinic_text += "Feel free to ask about new symptoms or type 'history' to see past consultations."
                     else:
