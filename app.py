@@ -2,13 +2,20 @@ from flask import Flask, request, jsonify
 import os
 import requests
 import base64
-import sqlite3
 import json
-import time
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
-from pydantic import SecretStr
+
+# Import all medical analysis functions from our medical services module
+from medical_services import (
+    init_database, save_user_profile, get_user_profile, is_new_user,
+    get_user_recent_location, save_diagnosis_to_history, save_feedback, 
+    get_user_history, get_history_id, save_user_location, reverse_geocode, 
+    find_nearby_clinics, save_user_country, get_user_country, 
+    check_disease_outbreaks_for_user, generate_language_aware_response,
+    gemini_combined_diagnose_with_history, gemini_text_diagnose_with_profile,
+    gemini_image_diagnose_with_profile, llm
+)
 
 load_dotenv()
 
@@ -16,25 +23,10 @@ load_dotenv()
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-# Location service URLs (no API keys needed)
-NOMINATIM_USER_AGENT = os.getenv("NOMINATIM_USER_AGENT", "MedSenseAI/1.0")
-OVERPASS_API_URL = os.getenv("OVERPASS_API_URL", "https://overpass-api.de/api/interpreter")
-NOMINATIM_API_URL = os.getenv("NOMINATIM_API_URL", "https://nominatim.openstreetmap.org")
-
-# WHO Disease Outbreak News API
-WHO_DON_API_URL = "https://extranet.who.int/publicemergency/api/events"
 
 # Flask App
 app = Flask(__name__)
-
-# Gemini 2.5 Flash LLM Init
-llm = ChatGoogleGenerativeAI(
-    model="models/gemini-2.5-flash",
-    api_key=SecretStr(GEMINI_API_KEY) if GEMINI_API_KEY else None
-)
 
 WELCOME_MSG = (
     "\U0001F44B Welcome to MedSense AI.\n"
@@ -48,411 +40,7 @@ WELCOME_MSG = (
 # Store user sessions with last activity timestamp and profile setup state
 user_sessions = {}
 
-# Initialize Database
-def init_database():
-    conn = sqlite3.connect('medsense_history.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS symptom_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            platform TEXT NOT NULL,
-            symptoms TEXT NOT NULL,
-            diagnosis TEXT NOT NULL,
-            timestamp DATETIME NOT NULL,
-            body_part TEXT,
-            severity TEXT,
-            location_lat REAL,
-            location_lon REAL,
-            location_address TEXT
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS diagnosis_feedback (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            history_id INTEGER NOT NULL,
-            feedback TEXT NOT NULL,
-            timestamp DATETIME NOT NULL,
-            FOREIGN KEY (history_id) REFERENCES symptom_history(id)
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_profiles (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT UNIQUE NOT NULL,
-            age INTEGER,
-            gender TEXT,
-            timestamp DATETIME NOT NULL,
-            platform TEXT NOT NULL
-        )
-    ''')
-    
-    # Add user locations table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_locations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            latitude REAL NOT NULL,
-            longitude REAL NOT NULL,
-            address TEXT,
-            timestamp DATETIME NOT NULL,
-            platform TEXT NOT NULL
-        )
-    ''')
-    
-    # Add user countries table for disease outbreak notifications
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_countries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT UNIQUE NOT NULL,
-            country TEXT NOT NULL,
-            timestamp DATETIME NOT NULL,
-            platform TEXT NOT NULL
-        )
-    ''')
-    
-    # Add disease outbreak notifications table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS disease_notifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            disease_name TEXT NOT NULL,
-            country TEXT NOT NULL,
-            who_event_id TEXT NOT NULL,
-            notification_sent BOOLEAN DEFAULT FALSE,
-            timestamp DATETIME NOT NULL
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
 
-def save_user_location(user_id, latitude, longitude, address, platform):
-    try:
-        conn = sqlite3.connect('medsense_history.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO user_locations (user_id, latitude, longitude, address, timestamp, platform)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (user_id, latitude, longitude, address, datetime.now(), platform))
-        conn.commit()
-        conn.close()
-        print(f"Saved location for user {user_id}: {latitude}, {longitude}")
-        return True
-    except Exception as e:
-        print(f"Error saving user location: {e}")
-        return False
-
-def get_user_recent_location(user_id, hours_back=24):
-    try:
-        conn = sqlite3.connect('medsense_history.db')
-        cursor = conn.cursor()
-        cutoff_time = datetime.now() - timedelta(hours=hours_back)
-        cursor.execute('''
-            SELECT latitude, longitude, address FROM user_locations 
-            WHERE user_id = ? AND timestamp >= ?
-            ORDER BY timestamp DESC LIMIT 1
-        ''', (user_id, cutoff_time))
-        result = cursor.fetchone()
-        conn.close()
-        if result:
-            return {"lat": result[0], "lon": result[1], "address": result[2]}
-        return None
-    except Exception as e:
-        print(f"Error retrieving user location: {e}")
-        return None
-
-def reverse_geocode(latitude, longitude):
-    """Convert coordinates to human-readable address using Nominatim"""
-    try:
-        url = f"{NOMINATIM_API_URL}/reverse"
-        params = {
-            'lat': latitude,
-            'lon': longitude,
-            'format': 'json',
-            'addressdetails': 1
-        }
-        headers = {'User-Agent': NOMINATIM_USER_AGENT}
-        
-        response = requests.get(url, params=params, headers=headers, timeout=10)
-        time.sleep(1)  # Rate limiting for Nominatim
-        
-        if response.status_code == 200:
-            data = response.json()
-            if 'display_name' in data:
-                return data['display_name']
-        return f"Location: {latitude:.4f}, {longitude:.4f}"
-    except Exception as e:
-        print(f"Error in reverse geocoding: {e}")
-        return f"Location: {latitude:.4f}, {longitude:.4f}"
-
-def find_nearby_clinics(latitude, longitude, radius_km=5):
-    """Find nearby medical facilities using Overpass API"""
-    try:
-        # Overpass QL query to find hospitals, clinics, and pharmacies
-        overpass_query = f"""
-        [out:json][timeout:25];
-        (
-          node["amenity"~"^(hospital|clinic|doctors|pharmacy)$"](around:{radius_km*1000},{latitude},{longitude});
-          way["amenity"~"^(hospital|clinic|doctors|pharmacy)$"](around:{radius_km*1000},{latitude},{longitude});
-          relation["amenity"~"^(hospital|clinic|doctors|pharmacy)$"](around:{radius_km*1000},{latitude},{longitude});
-        );
-        out center meta;
-        """
-        
-        response = requests.post(OVERPASS_API_URL, data=overpass_query, timeout=30)
-        
-        if response.status_code == 200:
-            data = response.json()
-            clinics = []
-            
-            for element in data.get('elements', [])[:5]:  # Limit to 5 closest
-                if 'tags' in element:
-                    name = element['tags'].get('name', 'Medical Facility')
-                    amenity = element['tags'].get('amenity', 'clinic')
-                    
-                    # Get coordinates
-                    if element['type'] == 'node':
-                        lat, lon = element['lat'], element['lon']
-                    elif 'center' in element:
-                        lat, lon = element['center']['lat'], element['center']['lon']
-                    else:
-                        continue
-                    
-                    # Calculate approximate distance
-                    distance = calculate_distance(latitude, longitude, lat, lon)
-                    
-                    clinics.append({
-                        'name': name,
-                        'type': amenity,
-                        'distance': round(distance, 2),
-                        'lat': lat,
-                        'lon': lon
-                    })
-            
-            # Sort by distance
-            clinics.sort(key=lambda x: x['distance'])
-            return clinics[:3]  # Return top 3 closest
-        
-        return []
-    except Exception as e:
-        print(f"Error finding nearby clinics: {e}")
-        return []
-
-def calculate_distance(lat1, lon1, lat2, lon2):
-    """Calculate distance between two points using Haversine formula"""
-    import math
-    
-    # Convert latitude and longitude from degrees to radians
-    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
-    
-    # Haversine formula
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
-    c = 2 * math.asin(math.sqrt(a))
-    
-    # Radius of earth in kilometers
-    r = 6371
-    return c * r
-
-# WHO Disease Outbreak Functions
-def save_user_country(user_id, country, platform):
-    """Save user's country for disease outbreak notifications"""
-    try:
-        conn = sqlite3.connect('medsense_history.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO user_countries (user_id, country, timestamp, platform)
-            VALUES (?, ?, ?, ?)
-        ''', (user_id, country, datetime.now(), platform))
-        conn.commit()
-        conn.close()
-        print(f"Saved country {country} for user {user_id}")
-        return True
-    except Exception as e:
-        print(f"Error saving user country: {e}")
-        return False
-
-def get_user_country(user_id):
-    """Get user's country for disease outbreak checking"""
-    try:
-        conn = sqlite3.connect('medsense_history.db')
-        cursor = conn.cursor()
-        cursor.execute('SELECT country FROM user_countries WHERE user_id = ?', (user_id,))
-        result = cursor.fetchone()
-        conn.close()
-        return result[0] if result else None
-    except Exception as e:
-        print(f"Error retrieving user country: {e}")
-        return None
-
-def fetch_who_disease_outbreaks():
-    """Fetch current disease outbreaks from WHO"""
-    try:
-        response = requests.get(WHO_DON_API_URL, timeout=10)
-        if response.status_code == 200:
-            return response.json()
-        else:
-            print(f"WHO API returned status code: {response.status_code}")
-            return None
-    except Exception as e:
-        print(f"Error fetching WHO disease outbreaks: {e}")
-        return None
-
-def check_disease_outbreaks_for_user(user_id):
-    """Check for disease outbreaks in user's country"""
-    user_country = get_user_country(user_id)
-    if not user_country:
-        return []
-    
-    outbreaks = fetch_who_disease_outbreaks()
-    if not outbreaks:
-        return []
-    
-    relevant_outbreaks = []
-    for event in outbreaks.get('events', []):
-        if user_country.lower() in event.get('location', '').lower():
-            relevant_outbreaks.append({
-                'disease': event.get('disease', 'Unknown'),
-                'location': event.get('location', ''),
-                'date': event.get('date_published', ''),
-                'summary': event.get('summary', '')[:200] + '...' if len(event.get('summary', '')) > 200 else event.get('summary', '')
-            })
-    
-    return relevant_outbreaks
-
-def generate_language_aware_response(user_text, response_template):
-    """Use Gemini to generate a response in the same language as user input"""
-    try:
-        prompt = f"""The user wrote: "{user_text}"
-
-Please respond with this message template but in the EXACT same language that the user used:
-
-"{response_template}"
-
-If the user wrote in English, respond in English. If Spanish, respond in Spanish. If French, respond in French, etc. 
-Keep the same meaning but translate to match the user's language.
-Only return the translated response, nothing else."""
-        
-        result = llm.invoke(prompt)
-        return result.content if isinstance(result.content, str) else str(result.content)
-    except Exception as e:
-        print(f"Language detection error: {e}")
-        return response_template  # Fallback to English
-
-def save_user_profile(user_id, age, gender, platform):
-    try:
-        conn = sqlite3.connect('medsense_history.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO user_profiles (user_id, age, gender, timestamp, platform)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (user_id, age, gender, datetime.now(), platform))
-        conn.commit()
-        conn.close()
-        print(f"Saved profile for user {user_id}: age {age}, gender {gender}")
-        return True
-    except Exception as e:
-        print(f"Error saving user profile: {e}")
-        return False
-
-def get_user_profile(user_id):
-    try:
-        conn = sqlite3.connect('medsense_history.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT age, gender FROM user_profiles WHERE user_id = ?
-        ''', (user_id,))
-        result = cursor.fetchone()
-        conn.close()
-        if result:
-            return {"age": result[0], "gender": result[1]}
-        return None
-    except Exception as e:
-        print(f"Error retrieving user profile: {e}")
-        return None
-
-def is_new_user(user_id):
-    """Check if user is new (no profile and no history)"""
-    profile = get_user_profile(user_id)
-    history = get_user_history(user_id)
-    return profile is None and len(history) == 0
-
-def save_diagnosis_to_history(user_id, platform, symptoms, diagnosis, body_part=None, severity=None, location_data=None):
-    try:
-        conn = sqlite3.connect('medsense_history.db')
-        cursor = conn.cursor()
-        
-        lat, lon, address = None, None, None
-        if location_data:
-            lat = location_data.get('lat')
-            lon = location_data.get('lon')
-            address = location_data.get('address')
-        
-        cursor.execute('''
-            INSERT INTO symptom_history (user_id, platform, symptoms, diagnosis, timestamp, body_part, severity, location_lat, location_lon, location_address)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (user_id, platform, symptoms, diagnosis, datetime.now(), body_part, severity, lat, lon, address))
-        history_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
-        print(f"Saved diagnosis to history for user {user_id}")
-        return history_id
-    except Exception as e:
-        print(f"Error saving to database: {e}")
-        return None
-
-def save_feedback(user_id, history_id, feedback):
-    try:
-        conn = sqlite3.connect('medsense_history.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO diagnosis_feedback (user_id, history_id, feedback, timestamp)
-            VALUES (?, ?, ?, ?)
-        ''', (user_id, history_id, feedback, datetime.now()))
-        conn.commit()
-        conn.close()
-        print(f"Saved feedback for user {user_id}, history_id {history_id}")
-    except Exception as e:
-        print(f"Error saving feedback: {e}")
-
-def get_user_history(user_id, days_back=365):
-    try:
-        conn = sqlite3.connect('medsense_history.db')
-        cursor = conn.cursor()
-        cutoff_date = datetime.now() - timedelta(days=days_back)
-        cursor.execute('''
-            SELECT symptoms, diagnosis, timestamp, body_part, severity 
-            FROM symptom_history 
-            WHERE user_id = ? AND timestamp >= ?
-            ORDER BY timestamp DESC
-        ''', (user_id, cutoff_date))
-        history = cursor.fetchall()
-        conn.close()
-        return history
-    except Exception as e:
-        print(f"Error retrieving history: {e}")
-        return []
-
-def get_history_id(user_id, timestamp):
-    try:
-        conn = sqlite3.connect('medsense_history.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT id FROM symptom_history 
-            WHERE user_id = ? AND timestamp = ?
-        ''', (user_id, timestamp))
-        result = cursor.fetchone()
-        conn.close()
-        return result[0] if result else None
-    except Exception as e:
-        print(f"Error retrieving history_id: {e}")
-        return None
 
 def clear_inactive_sessions():
     """Clear sessions for users inactive for more than 2 months"""
@@ -589,11 +177,10 @@ def whatsapp_webhook():
                             outbreak_msg = f"🌍 Thank you! I've saved {body.title()} as your country. I'll notify you of any disease outbreaks in your area.\n\nFeel free to ask about symptoms or type 'history' to see past consultations."
                         
                         send_whatsapp_message(sender, outbreak_msg)
-                    else:
-                        # Regular symptom text
-                        user_sessions[sender]["text"] = body
+                else:
+                    user_sessions[sender]["text"] = body
                         reply = handle_partial_input(sender, user_sessions[sender])
-                        send_whatsapp_message(sender, reply)
+                    send_whatsapp_message(sender, reply)
 
             elif 'image' in msg:
                 # Check if new user needs profile setup
@@ -682,7 +269,7 @@ def telegram_webhook():
                     if is_new_user(chat_id):
                         start_profile_setup(chat_id, "telegram")
                     else:
-                        send_telegram_message(chat_id, WELCOME_MSG)
+                    send_telegram_message(chat_id, WELCOME_MSG)
                 elif text.lower() in ["help", "/help"]:
                     send_telegram_message(chat_id, "Type your symptoms or send an image. You can provide text, image, or both. Say 'proceed' when ready for analysis!")
                 elif text.lower() in ["emergency", "/emergency"]:
@@ -734,11 +321,10 @@ def telegram_webhook():
                             outbreak_msg = f"🌍 Thank you! I've saved {text.title()} as your country. I'll notify you of any disease outbreaks in your area.\n\nFeel free to ask about symptoms or type 'history' to see past consultations."
                         
                         send_telegram_message(chat_id, outbreak_msg)
-                    else:
-                        # Regular symptom text
-                        user_sessions[chat_id]["text"] = text
+                else:
+                    user_sessions[chat_id]["text"] = text
                         reply = handle_partial_input(chat_id, user_sessions[chat_id])
-                        send_telegram_message(chat_id, reply)
+                    send_telegram_message(chat_id, reply)
 
             elif "photo" in msg:
                 # Check if new user needs profile setup
@@ -1051,7 +637,7 @@ def gemini_text_diagnose_with_profile(user_id, symptom_text):
     try:
         profile_text = get_profile_text(user_id)
         
-        prompt = f"""You're a helpful AI health assistant. A user says: \"{symptom_text}\"
+        prompt = f"""You're a helpful AI health assistant. A user says: "{symptom_text}"
 
 User Profile Information:{profile_text}
 
@@ -1068,7 +654,7 @@ Provide:
 
 KEEP CONCISE: Maximum 450 characters total to avoid overwhelming the user.
 
-End with a medical disclaimer appropriate for the detected language (equivalent to: \"I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.\")"""
+End with a medical disclaimer appropriate for the detected language (equivalent to: "I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.")"""
         result = llm.invoke(prompt)
         return result.content if isinstance(result.content, str) else str(result.content)
     except Exception as e:

@@ -1,11 +1,8 @@
-# Environment variables
 .env
 
-# Database files
 *.db
 medsense_history.db
 
-# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -27,20 +24,16 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual environments
 venv/
 env/
 ENV/
 
-# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# OS
 .DS_Store
 Thumbs.db
 
-# Logs
 *.log
