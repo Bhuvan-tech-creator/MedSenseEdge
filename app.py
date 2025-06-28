@@ -798,7 +798,7 @@ def get_location_and_clinics_text(location_data):
             location_text += f"\n{i}. {clinic['name']} ({clinic['type']}) - {clinic['distance']}km away"
     else:
         location_text += "\n\nNo nearby medical facilities found within 5km radius."
-    
+
     return location_text
 
 # Combined Gemini Analysis with History and Profile
@@ -829,6 +829,8 @@ def gemini_combined_diagnose_with_history(user_id, symptom_text, base64_img):
 
 CURRENT SYMPTOMS: "{symptom_text}"{profile_text}{history_text}
 
+CRITICAL: Detect the language of the user's symptoms text and respond in EXACTLY the same language. If the user wrote in Spanish, respond in Spanish. If they wrote in French, respond in French, etc.
+
 IMPORTANT: Consider the user's age and gender when providing analysis.
 
 Provide TWO separate diagnoses:
@@ -847,7 +849,7 @@ For each diagnosis provide:
 5. **Possible Causes**: A potential cause relevant to user's demographics
 6. **Recommendation**: Whether to visit clinic and urgency level
 
-End with: "I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses."
+End with a medical disclaimer appropriate for the detected language (equivalent to: "I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.")
 
 Keep under 750 characters total."""
                 },
@@ -881,6 +883,8 @@ def gemini_text_diagnose_with_profile(user_id, symptom_text):
 
 User Profile Information:{profile_text}
 
+CRITICAL: Detect the language of the user's symptoms text and respond in EXACTLY the same language. If the user wrote in Spanish, respond in Spanish. If they wrote in French, respond in French, etc.
+
 Provide a potential diagnosis, possible causes, and whether they should visit a clinic.
 IMPORTANT: Consider the user's age and gender in your analysis.
 
@@ -891,7 +895,7 @@ Provide:
 4. A potential cause relevant to the user's demographic
 5. Whether the user should visit a clinic and urgency level
 
-End with: \"I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.\"
+End with a medical disclaimer appropriate for the detected language (equivalent to: \"I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.\")
 Keep under 500 characters."""
         result = llm.invoke(prompt)
         return result.content if isinstance(result.content, str) else str(result.content)
@@ -917,6 +921,8 @@ def gemini_image_diagnose_with_profile(user_id, base64_img):
 
 User Profile Information:{profile_text}
 
+CRITICAL: Since this is an image-only analysis, respond in English by default. However, if the user has previously communicated in another language or if there are any text elements in the image that indicate a different language preference, respond in that language instead.
+
 IMPORTANT: Consider the user's age and gender when analyzing the image.
 
 Provide:
@@ -924,7 +930,7 @@ Provide:
 2. Possible conditions with confidence levels (percentage score from 60%-100%)
 3. Recommended next steps appropriate for the user's demographic
 
-End with: "I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses."
+End with a medical disclaimer appropriate for the language (equivalent to: "I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.")
 Keep response under 500 characters."""
                 },
                 {
