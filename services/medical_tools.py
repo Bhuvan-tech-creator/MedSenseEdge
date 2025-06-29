@@ -7,6 +7,7 @@ import json
 from typing import Optional, Dict, Any, List
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
+from datetime import datetime
 
 from models.user import get_user_profile, get_user_history, save_diagnosis_to_history, get_user_country, save_user_profile
 from services.external_apis import get_endlessmedical_diagnosis, check_disease_outbreaks_for_user, find_nearby_clinics, reverse_geocode, pubmed_search, set_endlessmedical_features, analyze_endlessmedical_session
@@ -338,8 +339,8 @@ def save_user_profile_tool(user_id: str, age: Optional[int] = None, gender: Opti
 @tool("check_disease_outbreaks", args_schema=UserProfileInput)
 def check_disease_outbreaks(user_id: str) -> str:
     """
-    Check for disease outbreaks in user's location.
-    Returns JSON with current outbreak information from WHO.
+    Check for disease outbreaks in user's location using WHO Disease Outbreak News API.
+    Returns JSON with current outbreak information from WHO Disease Outbreak News.
     """
     try:
         # Get outbreaks for user location
@@ -348,17 +349,47 @@ def check_disease_outbreaks(user_id: str) -> str:
         # Get user country for context
         country = get_user_country(user_id)
         
+        if not country:
+            return json.dumps({
+                "status": "no_country",
+                "message": "User location not set. Please mention your country to receive outbreak alerts.",
+                "user_country": None,
+                "outbreaks_found": 0,
+                "outbreaks": [],
+                "source": "WHO Disease Outbreak News"
+            }, indent=2)
+        
         result = {
+            "status": "success",
             "user_country": country,
             "outbreaks_found": len(outbreaks) if outbreaks else 0,
             "outbreaks": outbreaks or [],
-            "source": "WHO Disease Outbreak News"
+            "source": "WHO Disease Outbreak News API",
+            "last_checked": datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')
         }
+        
+        # Add helpful messaging based on results
+        if outbreaks:
+            result["alert_level"] = "active_outbreaks"
+            result["message"] = f"Found {len(outbreaks)} active disease outbreak(s) relevant to {country}. Please review the details below."
+        else:
+            result["alert_level"] = "no_outbreaks"
+            result["message"] = f"No active disease outbreaks currently reported for {country} in WHO Disease Outbreak News."
         
         return json.dumps(result, indent=2)
         
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        error_result = {
+            "status": "error",
+            "error": str(e),
+            "user_country": get_user_country(user_id),
+            "outbreaks_found": 0,
+            "outbreaks": [],
+            "source": "WHO Disease Outbreak News API",
+            "message": "Error accessing WHO Disease Outbreak News. Please try again later."
+        }
+        
+        return json.dumps(error_result, indent=2)
 
 
 @tool("final_diagnosis", args_schema=DiagnosisInput)

@@ -6,7 +6,7 @@ Replaces simple LLM calls with sophisticated tool orchestration
 import asyncio
 from services.medical_agent import get_medical_agent_system
 from services.session_service import get_session_service
-from services.external_apis import reverse_geocode
+from services.external_apis import reverse_geocode, detect_and_save_country_from_text
 from utils.constants import WELCOME_MSG, PROFILE_SETUP_MSG, AGE_REQUEST_MSG, GENDER_REQUEST_MSG
 from models.user import is_followup_response_expected
 from services.followup_service import get_followup_service
@@ -61,6 +61,17 @@ class MessageProcessor:
             if self.session_service.is_in_profile_setup(sender):
                 return self._handle_profile_setup(sender, text, platform)
             
+            # Auto-detect and save country mentions for outbreak monitoring BEFORE agent processing
+            detected_country = None
+            try:
+                detected_country = detect_and_save_country_from_text(sender, text, platform)
+                if detected_country:
+                    # Country was detected and saved - outbreak monitoring is now enabled
+                    print(f"🌍 Country detection: {detected_country} saved for user {sender}")
+                    print(f"✅ Country saved BEFORE agent processing - outbreak tool will now work!")
+            except Exception as e:
+                print(f"⚠️ Country detection error: {e}")
+            
             # Process through LangGraph medical agent system
             agent_system = self._get_agent_system()
             
@@ -111,6 +122,15 @@ class MessageProcessor:
             # Handle profile setup flow
             if self.session_service.is_in_profile_setup(sender):
                 return "Please complete your profile setup first before sending images."
+            
+            # Auto-detect and save country mentions for outbreak monitoring (from image caption)
+            if caption_text and caption_text.strip():
+                try:
+                    detected_country = detect_and_save_country_from_text(sender, caption_text.strip(), platform)
+                    if detected_country:
+                        print(f"🌍 Country detection from image caption: {detected_country} saved for user {sender}")
+                except Exception as e:
+                    print(f"⚠️ Country detection error from image caption: {e}")
             
             # Process image through LangGraph medical agent system
             agent_system = self._get_agent_system()
@@ -170,6 +190,22 @@ class MessageProcessor:
             
             # Get location name for context
             location_name = reverse_geocode(latitude, longitude)
+            
+            # Extract and save country from location for outbreak monitoring
+            try:
+                if location_name:
+                    # Try to extract country from reverse geocoded address
+                    # Addresses usually end with country name (e.g., "123 Main St, City, State, Country")
+                    address_parts = location_name.split(', ')
+                    if len(address_parts) >= 2:
+                        potential_country = address_parts[-1].strip()
+                        # Save the country for outbreak monitoring
+                        from models.user import save_user_country
+                        success = save_user_country(sender, potential_country, platform)
+                        if success:
+                            print(f"🌍 Country extracted from location: {potential_country} saved for user {sender}")
+            except Exception as e:
+                print(f"⚠️ Error extracting country from location: {e}")
             
             # Create message requesting clinic information
             location_message = f"Please find medical facilities and health information for my current location: {location_name}. Also check for any disease outbreaks in this area."

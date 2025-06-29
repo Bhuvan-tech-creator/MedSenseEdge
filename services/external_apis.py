@@ -5,7 +5,9 @@ import time
 import xml.etree.ElementTree as ET
 from flask import current_app
 from utils.helpers import calculate_distance
-from models.user import get_user_country
+from models.user import get_user_country, save_user_country
+from utils.constants import COUNTRY_KEYWORDS
+import re
 
 # Simple session cache for EndlessMedical
 _endlessmedical_session = {"session_id": None, "initialized": False}
@@ -301,41 +303,167 @@ def find_nearby_clinics(latitude, longitude, radius_km=5):
 
 
 def fetch_who_disease_outbreaks():
-    """Fetch current disease outbreaks from WHO"""
+    """Fetch current disease outbreaks from WHO Disease Outbreak News API"""
     try:
-        who_url = current_app.config.get('WHO_DON_API_URL')
-        response = requests.get(who_url, timeout=10)
+        # Use the correct WHO Disease Outbreak News API endpoint
+        who_api_url = "https://www.who.int/api/news/diseaseoutbreaknews"
+        
+        headers = {
+            'User-Agent': 'MedSenseAI/1.0 Medical Bot',
+            'Accept': 'application/json'
+        }
+        
+        print(f"🌐 Fetching WHO disease outbreaks from: {who_api_url}")
+        response = requests.get(who_api_url, headers=headers, timeout=15)
+        
+        print(f"📡 WHO API Response Status: {response.status_code}")
+        
         if response.status_code == 200:
-            return response.json()
+            try:
+                data = response.json()
+                print(f"📊 WHO API returned {len(data) if isinstance(data, list) else 'data'} outbreak entries")
+                return data
+            except ValueError as json_error:
+                print(f"❌ JSON parsing error: {json_error}")
+                print(f"Raw response: {response.text[:200]}...")
+                return None
         else:
-            print(f"WHO API returned status code: {response.status_code}")
+            print(f"❌ WHO API returned status code: {response.status_code}")
+            print(f"Response: {response.text[:200]}...")
             return None
+            
+    except requests.exceptions.Timeout:
+        print("⏱️ WHO API request timed out")
+        return None
+    except requests.exceptions.ConnectionError:
+        print("🌐 Connection error to WHO API")
+        return None
     except Exception as e:
-        print(f"Error fetching WHO disease outbreaks: {e}")
+        print(f"💥 Error fetching WHO disease outbreaks: {e}")
         return None
 
 
 def check_disease_outbreaks_for_user(user_id):
-    """Check for disease outbreaks in user's country"""
+    """Check for disease outbreaks in user's country using WHO Disease Outbreak News API"""
     user_country = get_user_country(user_id)
     if not user_country:
+        print(f"⚠️ No country set for user {user_id}")
         return []
     
-    outbreaks = fetch_who_disease_outbreaks()
-    if not outbreaks:
+    print(f"🔍 Checking disease outbreaks for user {user_id} in country: {user_country}")
+    
+    outbreaks_data = fetch_who_disease_outbreaks()
+    if not outbreaks_data:
+        print("❌ No outbreak data received from WHO API")
         return []
     
     relevant_outbreaks = []
-    for event in outbreaks.get('events', []):
-        if user_country.lower() in event.get('location', '').lower():
-            relevant_outbreaks.append({
-                'disease': event.get('disease', 'Unknown'),
-                'location': event.get('location', ''),
-                'date': event.get('date_published', ''),
-                'summary': event.get('summary', '')[:200] + '...' if len(event.get('summary', '')) > 200 else event.get('summary', '')
-            })
     
-    return relevant_outbreaks
+    try:
+        # Handle the WHO Disease Outbreak News API response structure
+        if isinstance(outbreaks_data, list):
+            outbreak_entries = outbreaks_data
+        else:
+            # If it's an object, look for common array keys
+            outbreak_entries = outbreaks_data.get('value', outbreaks_data.get('data', outbreaks_data.get('outbreaks', [])))
+        
+        print(f"📋 Processing {len(outbreak_entries)} outbreak entries")
+        
+        for entry in outbreak_entries:
+            try:
+                # Extract outbreak information from WHO Disease Outbreak News format
+                title = entry.get('Title', entry.get('title', 'Unknown outbreak'))
+                summary = entry.get('Summary', entry.get('summary', ''))
+                overview = entry.get('Overview', entry.get('overview', ''))
+                publication_date = entry.get('PublicationDate', entry.get('PublicationDateAndTime', entry.get('DateCreated', '')))
+                
+                # Combine summary and overview for location checking
+                content_text = f"{title} {summary} {overview}".lower()
+                
+                # Check if user's country is mentioned in the outbreak content
+                country_variations = [
+                    user_country.lower(),
+                    user_country.lower().replace(' ', ''),
+                    user_country.lower().replace('_', ' '),
+                ]
+                
+                # Add common country name variations
+                country_mapping = {
+                    'united states': ['usa', 'america', 'us'],
+                    'usa': ['united states', 'america'],
+                    'united kingdom': ['uk', 'britain', 'england'],
+                    'uk': ['united kingdom', 'britain', 'england'],
+                    'south africa': ['rsa'],
+                    'democratic republic of congo': ['drc', 'congo'],
+                    'drc': ['democratic republic of congo', 'congo'],
+                }
+                
+                if user_country.lower() in country_mapping:
+                    country_variations.extend(country_mapping[user_country.lower()])
+                
+                # Check if any country variation is mentioned with word boundaries
+                is_relevant = False
+                
+                for country_var in country_variations:
+                    # Use word boundaries to ensure exact matches
+                    pattern = r'\b' + re.escape(country_var) + r'\b'
+                    if re.search(pattern, content_text, re.IGNORECASE):
+                        is_relevant = True
+                        break
+                
+                # Additional check: look for specific country mentions in structured fields
+                if not is_relevant:
+                    # Check if this is a region-specific outbreak that might affect the user's country
+                    regions_content = entry.get('regionscountries', '')
+                    if regions_content and isinstance(regions_content, str):
+                        for country_var in country_variations:
+                            pattern = r'\b' + re.escape(country_var) + r'\b'
+                            if re.search(pattern, regions_content, re.IGNORECASE):
+                                is_relevant = True
+                                break
+                
+                if is_relevant:
+                    # Extract disease name from title if possible
+                    disease_name = title
+                    if '-' in title:
+                        disease_name = title.split('-')[0].strip()
+                    elif 'outbreak' in title.lower():
+                        disease_name = title.replace('outbreak', '').replace('Outbreak', '').strip()
+                    
+                    # Format the date
+                    formatted_date = publication_date
+                    if publication_date:
+                        try:
+                            # Try to parse and format the date
+                            from datetime import datetime
+                            if 'T' in publication_date:
+                                parsed_date = datetime.fromisoformat(publication_date.replace('Z', '+00:00'))
+                                formatted_date = parsed_date.strftime('%Y-%m-%d')
+                        except:
+                            pass  # Keep original date format if parsing fails
+                    
+                    outbreak_info = {
+                        'disease': disease_name,
+                        'title': title,
+                        'location': user_country,
+                        'date': formatted_date,
+                        'summary': (summary or overview)[:300] + '...' if len(summary or overview) > 300 else (summary or overview),
+                        'source': 'WHO Disease Outbreak News'
+                    }
+                    
+                    relevant_outbreaks.append(outbreak_info)
+                    print(f"✅ Found relevant outbreak: {disease_name} for {user_country}")
+                
+            except Exception as e:
+                print(f"⚠️ Error processing outbreak entry: {e}")
+                continue
+        
+        print(f"🎯 Found {len(relevant_outbreaks)} relevant outbreaks for {user_country}")
+        return relevant_outbreaks
+        
+    except Exception as e:
+        print(f"💥 Error processing WHO outbreak data: {e}")
+        return []
 
 
 def initialize_endlessmedical():
@@ -790,4 +918,132 @@ def analyze_endlessmedical_session():
             'status': 'error',
             'error': f'Unexpected error: {str(e)}',
             'details': 'An unexpected error occurred while analyzing the session'
-        } 
+        }
+
+
+def detect_and_save_country_from_text(user_id, text, platform):
+    """
+    Detect country mentions in user text and save to database for outbreak monitoring
+    """
+    try:
+        text_lower = text.lower()
+        
+        # Extended country mapping with common variations
+        country_mappings = {
+            # North America
+            'united states': ['usa', 'america', 'us', 'united states of america'],
+            'usa': ['united states', 'america', 'us'],
+            'america': ['usa', 'united states', 'us'],
+            'canada': ['canadian'],
+            'mexico': ['mexican'],
+            
+            # Europe
+            'united kingdom': ['uk', 'britain', 'england', 'scotland', 'wales'],
+            'uk': ['united kingdom', 'britain', 'england'],
+            'britain': ['uk', 'united kingdom', 'england'],
+            'england': ['uk', 'united kingdom', 'britain'],
+            'france': ['french'],
+            'germany': ['german'],
+            'spain': ['spanish'],
+            'italy': ['italian'],
+            'netherlands': ['holland', 'dutch'],
+            'switzerland': ['swiss'],
+            
+            # Asia
+            'china': ['chinese'],
+            'india': ['indian'],
+            'japan': ['japanese'],
+            'korea': ['south korea', 'korean'],
+            'south korea': ['korea', 'korean'],
+            'thailand': ['thai'],
+            'singapore': ['singaporean'],
+            'malaysia': ['malaysian'],
+            'indonesia': ['indonesian'],
+            'philippines': ['filipino', 'philippine'],
+            'vietnam': ['vietnamese'],
+            'pakistan': ['pakistani'],
+            'bangladesh': ['bangladeshi'],
+            
+            # Middle East
+            'saudi arabia': ['saudi', 'ksa'],
+            'uae': ['united arab emirates', 'emirates'],
+            'israel': ['israeli'],
+            'turkey': ['turkish'],
+            'iran': ['iranian'],
+            
+            # Africa
+            'south africa': ['rsa'],
+            'nigeria': ['nigerian'],
+            'egypt': ['egyptian'],
+            
+            # Oceania
+            'australia': ['australian', 'aussie'],
+            'new zealand': ['kiwi'],
+            
+            # South America
+            'brazil': ['brazilian'],
+            'argentina': ['argentinian'],
+            'chile': ['chilean'],
+            'colombia': ['colombian'],
+            'peru': ['peruvian'],
+            'venezuela': ['venezuelan']
+        }
+        
+        # Check for country mentions
+        detected_country = None
+        
+        # First check for exact matches
+        for country in COUNTRY_KEYWORDS:
+            if country in text_lower:
+                detected_country = country.title()
+                break
+        
+        # If no exact match, check variations
+        if not detected_country:
+            for main_country, variations in country_mappings.items():
+                if main_country in text_lower:
+                    detected_country = main_country.title()
+                    break
+                for variation in variations:
+                    if variation in text_lower:
+                        detected_country = main_country.title()
+                        break
+                if detected_country:
+                    break
+        
+        # Special phrases that indicate location
+        location_phrases = [
+            'i am in', 'i live in', 'i am from', 'i am located in',
+            'currently in', 'visiting', 'traveling in', 'staying in',
+            'here in', 'i\'m in', 'i\'m from', 'based in'
+        ]
+        
+        for phrase in location_phrases:
+            if phrase in text_lower:
+                # Extract text after the phrase
+                phrase_index = text_lower.find(phrase)
+                after_phrase = text_lower[phrase_index + len(phrase):].strip()
+                
+                # Look for country names in the text after the phrase
+                for country in COUNTRY_KEYWORDS:
+                    if country in after_phrase[:50]:  # Look in first 50 chars after phrase
+                        detected_country = country.title()
+                        break
+                
+                if detected_country:
+                    break
+        
+        if detected_country:
+            # Save the detected country
+            success = save_user_country(user_id, detected_country, platform)
+            if success:
+                print(f"🌍 Detected and saved country '{detected_country}' for user {user_id}")
+                return detected_country
+            else:
+                print(f"⚠️ Failed to save detected country '{detected_country}' for user {user_id}")
+        
+        return None
+        
+    except Exception as e:
+        print(f"💥 Error detecting country from text: {e}")
+        return None 

@@ -26,7 +26,6 @@ class Config:
     NOMINATIM_API_URL = os.getenv("NOMINATIM_API_URL", "https://nominatim.openstreetmap.org")
     
     # External APIs
-    WHO_DON_API_URL = "https://extranet.who.int/publicemergency/api/events"
     RAPIDAPI_KEY = os.getenv('RAPIDAPI_KEY')  # Secure EndlessMedical API via RapidAPI
     GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
     
