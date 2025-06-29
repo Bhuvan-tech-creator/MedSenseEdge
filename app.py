@@ -2,8 +2,9 @@
 MedSense AI - Medical Chatbot Application
 Refactored but maintains exact same functionality and launch behavior as original
 """
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, current_app
 import os
+import threading
 from datetime import datetime, timedelta
 from config import Config
 from models.database import init_database
@@ -125,9 +126,6 @@ def whatsapp_webhook():
             return challenge if challenge else "", 200
         return "Verification failed", 403
     
-    # IMMEDIATE response to prevent webhook timeouts and retries
-    response_data = {"status": "received"}
-    
     try:
         data = request.get_json()
         entry = data['entry'][0]['changes'][0]['value']
@@ -149,7 +147,6 @@ def whatsapp_webhook():
         should_send_processing_msg = not session_service.is_in_profile_setup(sender) and not session_service.should_start_profile_setup(sender)
         
         # Process message in background to prevent webhook timeout
-        import threading
         def process_message():
             try:
                 if 'text' in msg:
@@ -212,7 +209,6 @@ def whatsapp_webhook():
 def telegram_webhook():
     session_service.clear_inactive_sessions()
     
-    # IMMEDIATE response to prevent webhook timeouts and retries
     try:
         data = request.get_json()
         if "message" not in data:
@@ -234,7 +230,6 @@ def telegram_webhook():
         should_send_processing_msg = not session_service.is_in_profile_setup(chat_id) and not session_service.should_start_profile_setup(chat_id)
         
         # Process message in background to prevent webhook timeout
-        import threading
         def process_message():
             try:
                 if "text" in msg:
@@ -380,6 +375,121 @@ def test_duplicate_prevention():
             ])
         }
     })
+
+@app.route("/test-async-fix", methods=["GET"])
+def test_async_fix():
+    """Test endpoint to verify async/sync fixes are working"""
+    from services.message_processor import get_message_processor
+    import time
+    
+    test_results = {
+        "timestamp": datetime.now().isoformat(),
+        "tests": {}
+    }
+    
+    try:
+        # Test 1: Simple message processor instantiation
+        start_time = time.time()
+        processor = get_message_processor()
+        test_results["tests"]["processor_creation"] = {
+            "status": "success",
+            "time_ms": round((time.time() - start_time) * 1000, 2)
+        }
+    except Exception as e:
+        test_results["tests"]["processor_creation"] = {
+            "status": "failed",
+            "error": str(e)
+        }
+    
+    try:
+        # Test 2: Medical agent system instantiation
+        start_time = time.time()
+        from services.medical_agent import get_medical_agent_system
+        agent = get_medical_agent_system()
+        test_results["tests"]["agent_creation"] = {
+            "status": "success",
+            "time_ms": round((time.time() - start_time) * 1000, 2)
+        }
+    except Exception as e:
+        test_results["tests"]["agent_creation"] = {
+            "status": "failed",
+            "error": str(e)
+        }
+    
+    try:
+        # Test 3: Async analysis simulation (without actually running it)
+        processor = get_message_processor()
+        test_hash = processor._generate_request_hash("test_user", "text", "test message")
+        test_results["tests"]["hash_generation"] = {
+            "status": "success",
+            "hash": test_hash[:8] + "...",
+            "full_length": len(test_hash)
+        }
+    except Exception as e:
+        test_results["tests"]["hash_generation"] = {
+            "status": "failed",
+            "error": str(e)
+        }
+    
+    try:
+        # Test 4: Flask app context availability - NEW TEST
+        app_available = current_app is not None
+        config_accessible = current_app.config.get('GEMINI_API_KEY') is not None if app_available else False
+        test_results["tests"]["flask_context"] = {
+            "status": "success",
+            "app_available": app_available,
+            "config_accessible": config_accessible,
+            "context_type": str(type(current_app)) if app_available else "None"
+        }
+    except Exception as e:
+        test_results["tests"]["flask_context"] = {
+            "status": "failed",
+            "error": str(e)
+        }
+    
+    try:
+        # Test 5: Background thread simulation - NEW TEST
+        import threading
+        context_test_result = {"success": False, "error": None}
+        
+        def test_context_in_thread():
+            try:
+                # Capture app context like message processor does
+                app_context = current_app._get_current_object() if current_app else None
+                if app_context:
+                    with app_context.app_context():
+                        # Test if we can access config
+                        api_key = current_app.config.get('GEMINI_API_KEY')
+                        context_test_result["success"] = True
+                        context_test_result["api_key_accessible"] = api_key is not None
+                else:
+                    context_test_result["error"] = "No app context captured"
+            except Exception as e:
+                context_test_result["error"] = str(e)
+        
+        thread = threading.Thread(target=test_context_in_thread)
+        thread.start()
+        thread.join(timeout=5)  # Wait max 5 seconds
+        
+        test_results["tests"]["background_thread_context"] = {
+            "status": "success" if context_test_result["success"] else "failed",
+            "context_accessible": context_test_result["success"],
+            "api_key_accessible": context_test_result.get("api_key_accessible", False),
+            "error": context_test_result.get("error")
+        }
+    except Exception as e:
+        test_results["tests"]["background_thread_context"] = {
+            "status": "failed",
+            "error": str(e)
+        }
+    
+    # Overall status
+    all_passed = all(test.get("status") == "success" for test in test_results["tests"].values())
+    test_results["overall_status"] = "all_tests_passed" if all_passed else "some_tests_failed"
+    test_results["message"] = "Flask context fixes working properly" if all_passed else "Some issues detected"
+    test_results["flask_context_fix"] = "✅ Implemented" if test_results["tests"].get("background_thread_context", {}).get("context_accessible") else "❌ Issues detected"
+    
+    return jsonify(test_results)
 
 if __name__ == "__main__":
     print("🚀 Starting MedSense AI Bot...")

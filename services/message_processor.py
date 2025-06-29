@@ -5,7 +5,9 @@ Replaces simple LLM calls with sophisticated tool orchestration
 import asyncio
 import threading
 import hashlib
+import re
 from datetime import datetime, timedelta
+from flask import current_app  # Added import
 from services.medical_agent import get_medical_agent_system
 from services.session_service import get_session_service
 from services.external_apis import reverse_geocode
@@ -77,6 +79,58 @@ class MessageProcessor:
     
     def _get_agent_system(self):
         return get_medical_agent_system()
+    
+    def _run_async_analysis(self, agent_system, user_id, message, image_data, location, emergency):
+        """Run async analysis in a new event loop with Flask app context"""
+        # FLASK CONTEXT FIX: Capture the current app context
+        app_context = current_app._get_current_object() if current_app else None
+        
+        loop = None
+        try:
+            # Create new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            # FLASK CONTEXT FIX: Push app context in the new thread
+            if app_context:
+                with app_context.app_context():
+                    result = loop.run_until_complete(
+                        agent_system.analyze_medical_query(
+                            user_id=user_id,
+                            message=message,
+                            image_data=image_data,
+                            location=location,
+                            emergency=emergency
+                        )
+                    )
+            else:
+                # Fallback if no app context available
+                print("⚠️ WARNING: No Flask app context available - some features may not work")
+                result = loop.run_until_complete(
+                    agent_system.analyze_medical_query(
+                        user_id=user_id,
+                        message=message,
+                        image_data=image_data,
+                        location=location,
+                        emergency=emergency
+                    )
+                )
+            
+            return result
+        except Exception as e:
+            print(f"❌ Error in async analysis: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "fallback_message": "I encountered a technical issue analyzing your request."
+            }
+        finally:
+            # Clean up the event loop safely
+            if loop is not None:
+                try:
+                    loop.close()
+                except:
+                    pass
 
     def handle_text_message(self, sender, text, platform):
         try:
@@ -104,32 +158,10 @@ class MessageProcessor:
             
             print(f"🔄 PROCESSING: New text analysis {request_hash[:8]} for user {sender}")
             
-            # Process with medical agent using the existing event loop if available
+            # Process with medical agent - simplified approach
             try:
                 agent_system = self._get_agent_system()
-                
-                # Use existing event loop or create one if needed
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # If loop is running, create task for existing loop
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            future = executor.submit(self._run_agent_in_new_loop, agent_system, sender, text, None, None, False)
-                            result = future.result(timeout=60)  # 60 second timeout
-                    else:
-                        result = loop.run_until_complete(
-                            agent_system.analyze_medical_query(
-                                user_id=sender,
-                                message=text,
-                                image_data=None,
-                                location=None,
-                                emergency=False
-                            )
-                        )
-                except RuntimeError:
-                    # No event loop running, create a new one
-                    result = self._run_agent_in_new_loop(agent_system, sender, text, None, None, False)
+                result = self._run_async_analysis(agent_system, sender, text, None, None, False)
                 
                 if result.get("success"):
                     response = result.get("analysis", "I couldn't analyze your query. Please try again.")
@@ -150,23 +182,6 @@ class MessageProcessor:
         except Exception as e:
             print(f"Error processing text message: {e}")
             return "I apologize, but I'm experiencing technical difficulties. Please try again or consult a healthcare professional if your concern is urgent."
-    
-    def _run_agent_in_new_loop(self, agent_system, user_id, message, image_data, location, emergency):
-        """Run agent analysis in a new event loop"""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(
-                agent_system.analyze_medical_query(
-                    user_id=user_id,
-                    message=message,
-                    image_data=image_data,
-                    location=location,
-                    emergency=emergency
-                )
-            )
-        finally:
-            loop.close()
 
     def handle_image_message(self, sender, image_base64, platform, caption_text=None):
         try:
@@ -195,27 +210,7 @@ class MessageProcessor:
             
             try:
                 agent_system = self._get_agent_system()
-                
-                # Use safe event loop handling
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            future = executor.submit(self._run_agent_in_new_loop, agent_system, sender, image_message, image_base64, None, False)
-                            result = future.result(timeout=90)  # 90 second timeout for images
-                    else:
-                        result = loop.run_until_complete(
-                            agent_system.analyze_medical_query(
-                                user_id=sender,
-                                message=image_message,
-                                image_data=image_base64,
-                                location=None,
-                                emergency=False
-                            )
-                        )
-                except RuntimeError:
-                    result = self._run_agent_in_new_loop(agent_system, sender, image_message, image_base64, None, False)
+                result = self._run_async_analysis(agent_system, sender, image_message, image_base64, None, False)
                 
                 if result.get("success"):
                     response = result.get("analysis", "I couldn't analyze the image. Please try again.")
@@ -260,27 +255,7 @@ class MessageProcessor:
             
             try:
                 agent_system = self._get_agent_system()
-                
-                # Use safe event loop handling
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            future = executor.submit(self._run_agent_in_new_loop, agent_system, sender, location_message, None, location_name, False)
-                            result = future.result(timeout=60)
-                    else:
-                        result = loop.run_until_complete(
-                            agent_system.analyze_medical_query(
-                                user_id=sender,
-                                message=location_message,
-                                image_data=None,
-                                location=location_name,
-                                emergency=False
-                            )
-                        )
-                except RuntimeError:
-                    result = self._run_agent_in_new_loop(agent_system, sender, location_message, None, location_name, False)
+                result = self._run_async_analysis(agent_system, sender, location_message, None, location_name, False)
                 
                 if result.get("success"):
                     response = result.get("analysis", "I couldn't process your location. Please try again.")
@@ -328,7 +303,6 @@ class MessageProcessor:
 
     def _extract_age_from_text(self, text):
         try:
-            import re
             numbers = re.findall(r'\b\d+\b', text)
             for num_str in numbers:
                 age = int(num_str)
