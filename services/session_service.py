@@ -63,6 +63,13 @@ class SessionService:
         return is_new_user(user_id) and not self.is_in_profile_setup(user_id)
     def start_profile_setup(self, user_id, platform):
         """Start the profile setup process for new users"""
+        # Check if profile setup was already started recently (within 30 seconds)
+        if user_id in self.profile_setup_sessions:
+            started_at = self.profile_setup_sessions[user_id].get("started_at")
+            if started_at and (datetime.now() - started_at).total_seconds() < 30:
+                print(f"⚠️ Profile setup already initiated for {user_id} within last 30 seconds - skipping duplicate")
+                return  # Don't send another message
+        
         # Set state IMMEDIATELY to prevent duplicate calls
         self.profile_setup_sessions[user_id] = {
             "step": "age",
@@ -71,6 +78,7 @@ class SessionService:
             "temp_data": {}
         }
         # Then send the message
+        print(f"📧 Sending profile setup message to {user_id} on {platform}")
         if platform == "whatsapp":
             send_whatsapp_message(user_id, AGE_REQUEST_MSG)
         else:

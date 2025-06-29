@@ -4,7 +4,7 @@ Refactored but maintains exact same functionality and launch behavior as origina
 """
 from flask import Flask, request, jsonify
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from config import Config
 from models.database import init_database
 from services.session_service import get_session_service
@@ -17,15 +17,37 @@ from services.message_service import (
 from services.message_processor import get_message_processor
 from services.followup_service import get_followup_service
 from utils.constants import WELCOME_MSG, IMAGE_ERROR_MSG
+
 app = Flask(__name__)
 app.config.from_object(Config)
 init_database()
+
 session_service = get_session_service()
 message_processor = get_message_processor()
+
+# Message deduplication for WhatsApp webhooks
+processed_messages = {}
+
+def clean_old_messages():
+    """Clean messages older than 5 minutes"""
+    cutoff = datetime.now() - timedelta(minutes=5)
+    to_remove = [msg_id for msg_id, timestamp in processed_messages.items() if timestamp < cutoff]
+    for msg_id in to_remove:
+        del processed_messages[msg_id]
+
+def is_duplicate_message(message_id):
+    """Check if we've already processed this message"""
+    clean_old_messages()
+    if message_id in processed_messages:
+        return True
+    processed_messages[message_id] = datetime.now()
+    return False
+
 @app.route("/", methods=["GET"])
 def health_check():
     session_service.clear_inactive_sessions()
     return "MedSense AI Bot is running!", 200
+
 @app.route("/test-telegram", methods=["GET"])
 def test_telegram_endpoint():
     token_works = test_telegram_token()
@@ -34,6 +56,7 @@ def test_telegram_endpoint():
         "telegram_token_valid": token_works,
         "webhook_info": webhook_info
     })
+
 @app.route("/bot-info", methods=["GET"])
 def get_bot_info():
     """Get Telegram bot information"""
@@ -41,6 +64,7 @@ def get_bot_info():
     return jsonify({
         "bot_info": bot_info
     })
+
 @app.route("/test-followup", methods=["GET"])
 def test_followup_system():
     """Test follow-up system status"""
@@ -54,6 +78,7 @@ def test_followup_system():
         "pending_followups": pending_followups[:5],
         "check_interval_seconds": followup_service.check_interval
     })
+
 @app.route("/trigger-followup/<user_id>", methods=["GET"])
 def trigger_followup_test(user_id):
     """Manually trigger a follow-up for testing purposes"""
@@ -71,6 +96,7 @@ def trigger_followup_test(user_id):
             "status": "error",
             "error": str(e)
         })
+
 @app.route("/webhook", methods=["GET", "POST"])
 def whatsapp_webhook():
     session_service.clear_inactive_sessions()
@@ -89,6 +115,13 @@ def whatsapp_webhook():
             return "OK", 200
         msg = messages[0]
         sender = msg['from']
+        
+        # Check for duplicate messages using WhatsApp message ID
+        message_id = msg.get('id')
+        if message_id and is_duplicate_message(message_id):
+            print(f"⚠️ Skipping duplicate WhatsApp message {message_id} from {sender}")
+            return "OK", 200
+            
         session_service.update_session_activity(sender)
         if 'text' in msg:
             body = msg['text']['body']
@@ -118,6 +151,7 @@ def whatsapp_webhook():
     except Exception as e:
         print("WhatsApp Error:", e)
     return "OK", 200
+
 @app.route("/webhook/telegram", methods=["POST"])
 def telegram_webhook():
     session_service.clear_inactive_sessions()
@@ -166,6 +200,7 @@ def telegram_webhook():
     except Exception as e:
         print(f"Telegram webhook error: {e}")
         return "Error", 500
+
 @app.route("/set-webhook/<path:webhook_url>", methods=["GET"])
 def manual_set_webhook(webhook_url):
     if not webhook_url.startswith(('http://', 'https://')):
@@ -177,6 +212,7 @@ def manual_set_webhook(webhook_url):
         "webhook_url": f"{webhook_url}/webhook/telegram",
         "current_webhook_info": webhook_info
     })
+
 if __name__ == "__main__":
     print("🚀 Starting MedSense AI Bot...")
     followup_service = get_followup_service()

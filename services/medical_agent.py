@@ -93,11 +93,14 @@ class MedicalAgentSystem:
             last_message = messages[-1]
             if not hasattr(last_message, 'tool_calls') or not last_message.tool_calls:
                 return {"messages": []}
+            
+            print(f"🔧 AGENT: Executing {len(last_message.tool_calls)} tool(s)")
             tool_messages = []
             for tool_call in last_message.tool_calls:
                 tool_name = tool_call["name"]
                 tool_args = tool_call["args"]
                 tool_call_id = tool_call["id"]
+                print(f"🎯 AGENT: About to call {tool_name} with args: {list(tool_args.keys())}")
                 try:
                     if tool_name in self.tools_by_name:
                         tool = self.tools_by_name[tool_name]
@@ -107,13 +110,16 @@ class MedicalAgentSystem:
                             name=tool_name,
                             tool_call_id=tool_call_id
                         ))
+                        print(f"✅ AGENT: Tool {tool_name} completed successfully")
                     else:
+                        print(f"❌ AGENT: Tool {tool_name} not found")
                         tool_messages.append(ToolMessage(
                             content=f"Tool {tool_name} not found",
                             name=tool_name,
                             tool_call_id=tool_call_id
                         ))
                 except Exception as e:
+                    print(f"❌ AGENT: Tool {tool_name} failed with error: {str(e)}")
                     tool_messages.append(ToolMessage(
                         content=f"Error executing {tool_name}: {str(e)}",
                         name=tool_name,
@@ -168,6 +174,15 @@ class MedicalAgentSystem:
         Returns:
             Analysis results with tool outputs and recommendations
         """
+        print(f"🤖 MEDICAL AGENT: Starting analysis for user {user_id}")
+        print(f"📝 QUERY: {message[:100]}{'...' if len(message) > 100 else ''}")
+        if image_data:
+            print(f"🖼️ IMAGE: Medical image provided ({len(image_data) if isinstance(image_data, bytes) else 'base64 string'} bytes)")
+        if location:
+            print(f"📍 LOCATION: {location}")
+        if emergency:
+            print(f"🚨 EMERGENCY: Emergency mode activated")
+            
         initial_state = MedicalAgentState(
             messages=[HumanMessage(content=message)],
             user_id=user_id,
@@ -190,15 +205,19 @@ class MedicalAgentSystem:
             initial_state["messages"] = [image_message]
         config = {"configurable": {"thread_id": user_id}}
         try:
+            print(f"🔄 AGENT: Beginning LangGraph execution...")
             result = await self.graph.ainvoke(initial_state, config=config)
+            tools_used = self._extract_tools_used(result)
+            print(f"✅ AGENT: Analysis complete - Used tools: {tools_used}")
             return {
                 "success": True,
                 "analysis": self._extract_analysis_result(result),
-                "tools_used": self._extract_tools_used(result),
+                "tools_used": tools_used,
                 "emergency_detected": result.get("emergency_mode", False),
                 "metadata": result.get("analysis_metadata", {})
             }
         except Exception as e:
+            print(f"❌ AGENT: Analysis failed with error: {str(e)}")
             return {
                 "success": False,
                 "error": str(e),

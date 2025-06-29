@@ -24,9 +24,11 @@ class MessageProcessor:
                 followup_service = get_followup_service()
                 return followup_service.handle_followup_response(sender, text)
             if self.session_service.should_start_profile_setup(sender):
+                print(f"🔄 Starting profile setup for new user {sender} on {platform}")
                 self.session_service.start_profile_setup(sender, platform)
                 return None  # Don't return message since start_profile_setup already sends one
             if self.session_service.is_in_profile_setup(sender):
+                print(f"👤 Handling profile setup step for {sender} on {platform}")
                 return self._handle_profile_setup(sender, text, platform)
             agent_system = self._get_agent_system()
             loop = asyncio.new_event_loop()
