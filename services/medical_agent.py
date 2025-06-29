@@ -66,9 +66,8 @@ class MedicalAgentSystem:
         return ChatGoogleGenerativeAI(
             model="gemini-2.0-flash-exp",
             google_api_key=SecretStr(api_key),
-            temperature=0.1,
-            max_output_tokens=2048,
-            convert_system_message_to_human=True
+            temperature=0.2,
+            convert_system_message_to_human=False
         ).bind_tools(self.tools)
     
     def _build_agent_graph(self) -> StateGraph:

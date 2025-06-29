@@ -82,7 +82,7 @@ class MessageProcessor:
             print(f"Error processing text message: {e}")
             return "I apologize, but I'm experiencing technical difficulties. Please try again or consult a healthcare professional if your concern is urgent."
     
-    def handle_image_message(self, sender, image_base64, platform):
+    def handle_image_message(self, sender, image_base64, platform, caption_text=None):
         """
         Handle image messages using the LangGraph medical agent
         
@@ -91,6 +91,7 @@ class MessageProcessor:
         - Integration with user profile and history
         - Clinical database validation
         - Safety checking for emergency conditions
+        - Support for image + text combinations
         """
         try:
             # Check if user needs profile setup
@@ -105,8 +106,11 @@ class MessageProcessor:
             # Process image through LangGraph medical agent system
             agent_system = self._get_agent_system()
             
-            # Create a descriptive message for the image
-            image_message = "I'm sharing a medical image for analysis. Please analyze this image for any medical concerns."
+            # Use provided text or create default message
+            if caption_text and caption_text.strip():
+                image_message = caption_text.strip()
+            else:
+                image_message = "Please analyze this medical image for any health concerns."
             
             # Run async agent processing in sync context
             loop = asyncio.new_event_loop()

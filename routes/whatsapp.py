@@ -54,14 +54,17 @@ def whatsapp_webhook():
                 send_whatsapp_message(sender, response)
                 
         elif 'image' in msg:
-            # Handle image message
+            # Handle image message (with optional caption text)
             media_id = msg['image']['id']
             image_url = get_whatsapp_image_url(media_id)
+            
+            # Extract caption text if present
+            caption_text = msg['image'].get('caption', None)
             
             if image_url:
                 image_base64 = download_and_encode_whatsapp_image(image_url)
                 if image_base64:
-                    response = message_processor.handle_image_message(sender, image_base64, "whatsapp")
+                    response = message_processor.handle_image_message(sender, image_base64, "whatsapp", caption_text)
                     if response:
                         send_whatsapp_message(sender, response)
                 else:
