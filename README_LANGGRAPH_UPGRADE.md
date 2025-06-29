@@ -200,7 +200,7 @@ def tools_node(state: MedicalAgentState) -> Dict[str, Any]:
 langchain-core>=0.3.20        # Tool framework
 langchain-community>=0.3.20   # Additional tools  
 langgraph>=0.2.40            # Agent orchestration
-duckduckgo-search>=6.0.0     # Web search capability
+beautifulsoup4>=4.12.0       # HTML parsing for PubMed
 ```
 
 ## 📁 Project Structure
@@ -222,7 +222,7 @@ MedSenseEdge/
 ```bash
 🎯 Tool Validation:
 ✅ Available tools: ['find_nearby_hospitals', 'search_medical_database', 'web_search_medical', 'get_user_profile', 'save_user_profile', 'check_disease_outbreaks', 'final_diagnosis']
-✅ DuckDuckGo search works  
+✅ PubMed search works  
 ✅ JSON responses functional
 ✅ All imports successful
 ```

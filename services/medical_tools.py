@@ -9,7 +9,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from models.user import get_user_profile, get_user_history, save_diagnosis_to_history, get_user_country, save_user_profile
-from services.external_apis import get_endlessmedical_diagnosis, check_disease_outbreaks_for_user, find_nearby_clinics, reverse_geocode, duckduckgo_search, set_endlessmedical_features, analyze_endlessmedical_session
+from services.external_apis import get_endlessmedical_diagnosis, check_disease_outbreaks_for_user, find_nearby_clinics, reverse_geocode, pubmed_search, set_endlessmedical_features, analyze_endlessmedical_session
 
 
 class LocationInput(BaseModel):
@@ -260,20 +260,19 @@ def search_medical_database(symptoms: str, age: Optional[int] = None, gender: Op
 @tool("web_search_medical", args_schema=WebSearchInput)
 def web_search_medical(query: str, max_results: int = 5) -> str:
     """
-    Search the web for medical information and research.
-    Returns JSON with search results from medical sources.
+    Search PubMed for medical research articles and clinical information.
+    Returns JSON with peer-reviewed medical literature from PubMed database.
     """
     try:
-        # Enhanced medical query
-        medical_query = f"medical research treatment {query} symptoms diagnosis"
-        
-        # Perform web search
-        results = duckduckgo_search(medical_query, max_results)
+        # Perform PubMed search for medical articles
+        results = pubmed_search(query, max_results)
         
         return json.dumps({
             "query": query,
             "results_count": len(results),
-            "search_results": results
+            "search_results": results,
+            "source": "PubMed E-utilities API",
+            "description": "Peer-reviewed medical literature and research articles"
         }, indent=2)
         
     except Exception as e:
@@ -391,15 +390,14 @@ def final_diagnosis(user_id: str, symptoms: str, diagnosis: str, confidence: flo
         return json.dumps({"error": str(e)})
 
 
-# Export pure data tools for LangGraph agent
+# Export pure data tools for LangGraph agent - prioritizing PubMed research
 MEDICAL_TOOLS = [
-    find_nearby_hospitals,
-    set_medical_features,
-    analyze_medical_features,
-    search_medical_database,
-    web_search_medical,
-    get_user_profile_tool,
-    save_user_profile_tool,
-    check_disease_outbreaks,
-    final_diagnosis
+    web_search_medical,        # PRIMARY: PubMed research search
+    find_nearby_hospitals,     # Location-based services
+    get_user_profile_tool,     # User information
+    save_user_profile_tool,    # Profile management
+    check_disease_outbreaks,   # WHO outbreak data
+    final_diagnosis,           # Save analysis results
+    # Legacy EndlessMedical tools (less priority)
+    search_medical_database,   # Backup clinical database
 ] 
