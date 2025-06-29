@@ -27,13 +27,14 @@ class Config:
     
     # External APIs
     WHO_DON_API_URL = "https://extranet.who.int/publicemergency/api/events"
-    ENDLESSMEDICAL_API_URL = "https://api.endlessmedical.com/v1/dx"
+    RAPIDAPI_KEY = os.getenv('RAPIDAPI_KEY')  # Secure EndlessMedical API via RapidAPI
+    GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
     
     # Database
     DATABASE_PATH = 'medsense_history.db'
     
     # Session settings
     SESSION_CLEANUP_HOURS = 48  # 2 months = 48 * 30 hours
+    SESSION_TIMEOUT = 1800  # 30 minutes
     
     # Message limits
-    MAX_MESSAGE_LENGTH = 4096 

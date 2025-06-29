@@ -156,181 +156,79 @@ def check_disease_outbreaks_for_user(user_id):
 
 
 def initialize_endlessmedical():
-    """Initialize EndlessMedical API connection"""
-    try:
-        endlessmedical_url = current_app.config.get('ENDLESSMEDICAL_API_URL')
-        # Test connection with InitSession endpoint (with SSL verification disabled for troubleshooting)
-        response = requests.get(f"{endlessmedical_url}/InitSession", timeout=10, verify=False)
-        
-        if response.status_code == 200:
-            result = response.json()
-            if result.get('status') == 'ok':
-                print("✅ EndlessMedical API connection successful")
-                return True
-            else:
-                print(f"❌ EndlessMedical API test failed: {result}")
-                return None
-        else:
-            print(f"❌ EndlessMedical API test failed: {response.status_code}")
-            return None
-    except Exception as e:
-        print(f"❌ EndlessMedical API initialization error: {e}")
-        print("🔬 Note: EndlessMedical validation will be disabled, falling back to Gemini-only analysis.")
-        return None
+    """DEPRECATED - Use set_endlessmedical_features instead"""
+    print("⚠️ WARNING: initialize_endlessmedical is deprecated. Use RapidAPI functions instead.")
+    return False
 
 
 def get_endlessmedical_diagnosis(symptoms_text, user_profile):
-    """Get diagnosis from EndlessMedical API as a second layer of confirmation"""
+    """DEPRECATED - Use set_endlessmedical_features + analyze_endlessmedical_session instead"""
+    print("⚠️ WARNING: get_endlessmedical_diagnosis is deprecated. Using RapidAPI functions instead.")
+    
+    # Redirect to new implementation
     try:
-        endlessmedical_url = current_app.config.get('ENDLESSMEDICAL_API_URL')
-        
-        # Initialize session
-        session_response = requests.get(f"{endlessmedical_url}/InitSession", timeout=10, verify=False)
-        if session_response.status_code != 200:
-            return None
-            
-        session_data = session_response.json()
-        if session_data.get('status') != 'ok':
-            return None
-            
-        session_id = session_data.get('SessionID')
-        if not session_id:
-            return None
-        
-        # Accept terms of use
-        terms_passphrase = "I have read, understood and I accept and agree to comply with the Terms of Use of EndlessMedicalAPI and Endless Medical services. The Terms of Use are available on endlessmedical.com"
-        
-        terms_response = requests.post(
-            f"{endlessmedical_url}/AcceptTermsOfUse",
-            params={'SessionID': session_id, 'passphrase': terms_passphrase},
-            timeout=10,
-            verify=False
-        )
-        
-        if terms_response.status_code != 200 or terms_response.json().get('status') != 'ok':
-            return None
-        
-        successful_updates = 0
-        
-        # Set Age (confirmed working)
-        if user_profile and user_profile.get('age'):
-            age = user_profile.get('age')
-            if str(age).isdigit():
-                age_response = requests.post(
-                    f"{endlessmedical_url}/UpdateFeature",
-                    params={'SessionID': session_id, 'name': 'Age', 'value': str(age)},
-                    timeout=10,
-                    verify=False
-                )
-                if age_response.status_code == 200:
-                    successful_updates += 1
-                    print(f"✅ Age set successfully")
-        
-        # Set temperature based on symptoms (confirmed working)
+        # Map common symptoms to features
+        features = {}
         symptoms_lower = symptoms_text.lower()
-        if any(fever_word in symptoms_lower for fever_word in ['fever', 'hot', 'temperature', 'high temp']):
-            temp_response = requests.post(
-                f"{endlessmedical_url}/UpdateFeature",
-                params={'SessionID': session_id, 'name': 'Temp', 'value': '38.5'},  # 38.5°C = fever
-                timeout=10,
-                verify=False
-            )
-            if temp_response.status_code == 200:
-                successful_updates += 1
-                print(f"✅ Fever temperature set successfully")
-        elif any(cold_word in symptoms_lower for cold_word in ['chills', 'cold', 'shivering']):
-            # Try setting chills
-            chills_response = requests.post(
-                f"{endlessmedical_url}/UpdateFeature",
-                params={'SessionID': session_id, 'name': 'Chills', 'value': '1'},  # Try numeric format
-                timeout=10,
-                verify=False
-            )
-            if chills_response.status_code == 200:
-                successful_updates += 1
-                print(f"✅ Chills set successfully")
         
-        # Set fatigue if mentioned
-        if any(fatigue_word in symptoms_lower for fatigue_word in ['tired', 'fatigue', 'weakness', 'weak']):
-            fatigue_response = requests.post(
-                f"{endlessmedical_url}/UpdateFeature",
-                params={'SessionID': session_id, 'name': 'GeneralizedFatigue', 'value': '1'},
-                timeout=10,
-                verify=False
-            )
-            if fatigue_response.status_code == 200:
-                successful_updates += 1
-                print(f"✅ Fatigue set successfully")
-        
-        # Only proceed with analysis if we have at least one successful feature update
-        if successful_updates == 0:
-            print("⚠️ No features were successfully updated, skipping analysis")
-            return None
-        
-        print(f"📊 Proceeding with analysis using {successful_updates} features")
-        
-        # Analyze
-        analyze_response = requests.get(
-            f"{endlessmedical_url}/Analyze",
-            params={'SessionID': session_id},
-            timeout=15,
-            verify=False
-        )
-        
-        if analyze_response.status_code == 200:
-            analyze_data = analyze_response.json()
-            if analyze_data.get('status') == 'ok':
-                diseases = analyze_data.get('Diseases', [])
-                
-                if diseases:
-                    # Convert to standard format
-                    conditions = []
-                    for disease_dict in diseases[:3]:  # Top 3
-                        for disease_name, probability in disease_dict.items():
-                            conditions.append({
-                                'name': disease_name,
-                                'probability': float(probability),
-                                'common_name': disease_name
-                            })
-                    
-                    print(f"✅ EndlessMedical returned {len(conditions)} conditions")
-                    return {
-                        'conditions': conditions,
-                        'status': 'success'
-                    }
-                else:
-                    print("ℹ️ EndlessMedical analysis completed but no diseases found")
-                    return {
-                        'conditions': [],
-                        'status': 'no_conditions'
-                    }
-            else:
-                print(f"❌ EndlessMedical analysis failed: {analyze_data}")
+        # Age from profile
+        if user_profile and user_profile.get('age'):
+            features['Age'] = str(user_profile.get('age'))
         else:
-            print(f"❌ EndlessMedical analysis HTTP error: {analyze_response.status_code}")
-        
-        return None
-        
+            features['Age'] = '30'  # Default age
+            
+        # Map symptoms to features
+        if 'headache' in symptoms_lower:
+            features['HeadacheFrontal'] = '1'
+        if 'fever' in symptoms_lower:
+            features['Temp'] = '38.5'
+        if 'tired' in symptoms_lower or 'fatigue' in symptoms_lower:
+            features['GeneralizedFatigue'] = '1'
+        if 'nausea' in symptoms_lower:
+            features['Nausea'] = '1'
+        if 'hand' in symptoms_lower and ('hurt' in symptoms_lower or 'pain' in symptoms_lower):
+            features['JointsPain'] = '1'
+            features['MuscleGenPain'] = '1'
+            
+        # Use new RapidAPI functions
+        set_result = set_endlessmedical_features(features)
+        if set_result.get('status') == 'success':
+            return analyze_endlessmedical_session()
+        else:
+            return None
+            
     except Exception as e:
-        print(f"Error getting EndlessMedical diagnosis: {e}")
+        print(f"Error in deprecated function redirect: {e}")
         return None
 
 
 def set_endlessmedical_features(features_dict):
     """
-    Set medical features in EndlessMedical session (LLM-controlled)
+    Set medical features in EndlessMedical session via RapidAPI (secure)
     This allows the LLM to specify exactly which features to set
     """
     global _endlessmedical_session
     
     try:
-        endlessmedical_url = current_app.config.get('ENDLESSMEDICAL_API_URL')
+        # RapidAPI configuration
+        rapidapi_key = current_app.config.get('RAPIDAPI_KEY')
+        if not rapidapi_key:
+            return {"status": "error", "error": "RAPIDAPI_KEY not found in configuration"}
+        
+        rapidapi_host = "endlessmedicalapi1.p.rapidapi.com"
+        base_url = f"https://{rapidapi_host}/v1/dx"
+        
+        headers = {
+            "X-RapidAPI-Key": rapidapi_key,
+            "X-RapidAPI-Host": rapidapi_host,
+            "Content-Type": "application/json"
+        }
         
         # Initialize session if needed
         if not _endlessmedical_session["initialized"]:
-            session_response = requests.get(f"{endlessmedical_url}/InitSession", timeout=10, verify=False)
+            session_response = requests.get(f"{base_url}/InitSession", headers=headers, timeout=10)
             if session_response.status_code != 200:
-                return {"status": "error", "error": "Failed to initialize session"}
+                return {"status": "error", "error": f"Failed to initialize session: {session_response.status_code}"}
                 
             session_data = session_response.json()
             if session_data.get('status') != 'ok':
@@ -344,10 +242,10 @@ def set_endlessmedical_features(features_dict):
             terms_passphrase = "I have read, understood and I accept and agree to comply with the Terms of Use of EndlessMedicalAPI and Endless Medical services. The Terms of Use are available on endlessmedical.com"
             
             terms_response = requests.post(
-                f"{endlessmedical_url}/AcceptTermsOfUse",
+                f"{base_url}/AcceptTermsOfUse",
                 params={'SessionID': session_id, 'passphrase': terms_passphrase},
-                timeout=10,
-                verify=False
+                headers=headers,
+                timeout=10
             )
             
             if terms_response.status_code != 200 or terms_response.json().get('status') != 'ok':
@@ -355,7 +253,7 @@ def set_endlessmedical_features(features_dict):
             
             _endlessmedical_session["session_id"] = session_id
             _endlessmedical_session["initialized"] = True
-            print(f"✅ EndlessMedical session initialized: {session_id}")
+            print(f"✅ EndlessMedical session initialized via RapidAPI: {session_id}")
         
         session_id = _endlessmedical_session["session_id"]
         features_set = []
@@ -364,10 +262,10 @@ def set_endlessmedical_features(features_dict):
         for feature_name, feature_value in features_dict.items():
             try:
                 response = requests.post(
-                    f"{endlessmedical_url}/UpdateFeature",
+                    f"{base_url}/UpdateFeature",
                     params={'SessionID': session_id, 'name': feature_name, 'value': str(feature_value)},
-                    timeout=10,
-                    verify=False
+                    headers=headers,
+                    timeout=10
                 )
                 
                 if response.status_code == 200:
@@ -387,13 +285,13 @@ def set_endlessmedical_features(features_dict):
         }
         
     except Exception as e:
-        print(f"Error setting EndlessMedical features: {e}")
+        print(f"Error setting EndlessMedical features via RapidAPI: {e}")
         return {"status": "error", "error": str(e)}
 
 
 def analyze_endlessmedical_session():
     """
-    Analyze the current EndlessMedical session
+    Analyze the current EndlessMedical session via RapidAPI (secure)
     Should be called after set_endlessmedical_features
     """
     global _endlessmedical_session
@@ -402,15 +300,28 @@ def analyze_endlessmedical_session():
         if not _endlessmedical_session["initialized"] or not _endlessmedical_session["session_id"]:
             return {"status": "error", "error": "No active session. Call set_medical_features first."}
         
-        endlessmedical_url = current_app.config.get('ENDLESSMEDICAL_API_URL')
+        # RapidAPI configuration
+        rapidapi_key = current_app.config.get('RAPIDAPI_KEY')
+        if not rapidapi_key:
+            return {"status": "error", "error": "RAPIDAPI_KEY not found in configuration"}
+        
+        rapidapi_host = "endlessmedicalapi1.p.rapidapi.com"
+        base_url = f"https://{rapidapi_host}/v1/dx"
+        
+        headers = {
+            "X-RapidAPI-Key": rapidapi_key,
+            "X-RapidAPI-Host": rapidapi_host,
+            "Content-Type": "application/json"
+        }
+        
         session_id = _endlessmedical_session["session_id"]
         
         # Analyze
         analyze_response = requests.get(
-            f"{endlessmedical_url}/Analyze",
+            f"{base_url}/Analyze",
             params={'SessionID': session_id},
-            timeout=15,
-            verify=False
+            headers=headers,
+            timeout=15
         )
         
         if analyze_response.status_code == 200:
@@ -429,7 +340,7 @@ def analyze_endlessmedical_session():
                                 'common_name': disease_name
                             })
                     
-                    print(f"✅ EndlessMedical analysis: {len(conditions)} conditions found")
+                    print(f"✅ EndlessMedical analysis via RapidAPI: {len(conditions)} conditions found")
                     
                     # Clear session for next use
                     _endlessmedical_session["initialized"] = False
@@ -454,5 +365,5 @@ def analyze_endlessmedical_session():
             return {"status": "error", "error": f"HTTP error: {analyze_response.status_code}"}
         
     except Exception as e:
-        print(f"Error analyzing EndlessMedical session: {e}")
+        print(f"Error analyzing EndlessMedical session via RapidAPI: {e}")
         return {"status": "error", "error": str(e)} 

@@ -133,15 +133,15 @@ def whatsapp_webhook():
         if not messages:
             return "OK", 200
         
-        msg = messages[0]
-        sender = msg['from']
+            msg = messages[0]
+            sender = msg['from']
 
         # Update session activity
         session_service.update_session_activity(sender)
 
-        if 'text' in msg:
+            if 'text' in msg:
             # Handle text message
-            body = msg['text']['body']
+                body = msg['text']['body']
             response = message_processor.handle_text_message(sender, body, "whatsapp")
             
             if response:
@@ -155,9 +155,9 @@ def whatsapp_webhook():
             # Extract caption text if present
             caption_text = msg['image'].get('caption', None)
             
-            if image_url:
+                if image_url:
                 image_base64 = download_and_encode_whatsapp_image(image_url)
-                if image_base64:
+                    if image_base64:
                     response = message_processor.handle_image_message(sender, image_base64, "whatsapp", caption_text)
                     if response:
                         send_whatsapp_message(sender, response)
@@ -166,11 +166,11 @@ def whatsapp_webhook():
             else:
                 send_whatsapp_message(sender, IMAGE_ERROR_MSG)
 
-        elif 'location' in msg:
+            elif 'location' in msg:
             # Handle location message
-            latitude = msg['location']['latitude']
-            longitude = msg['location']['longitude']
-            
+                latitude = msg['location']['latitude']
+                longitude = msg['location']['longitude']
+                
             response = message_processor.handle_location_message(sender, latitude, longitude, "whatsapp")
             if response:
                 send_whatsapp_message(sender, response)
@@ -193,27 +193,27 @@ def telegram_webhook():
         if "message" not in data:
             return "OK", 200
         
-        msg = data["message"]
-        chat_id = str(msg.get("chat", {}).get("id", ""))
-        
-        if not chat_id:
-            return "No chat_id", 400
+            msg = data["message"]
+            chat_id = str(msg.get("chat", {}).get("id", ""))
+            
+            if not chat_id:
+                return "No chat_id", 400
 
         # Update session activity
         session_service.update_session_activity(chat_id)
 
-        if "text" in msg:
+            if "text" in msg:
             # Handle text message
-            text = msg["text"]
-            
+                text = msg["text"]
+                
             # Handle /start command specially
-            if text.startswith("/start"):
+                if text.startswith("/start"):
                 if session_service.should_start_profile_setup(chat_id):
                     session_service.start_profile_setup(chat_id, "telegram")
                 else:
                     send_telegram_message(chat_id, WELCOME_MSG)
-                return "OK", 200
-            
+                        return "OK", 200
+                    
             # Convert other Telegram commands to regular text
             if text.startswith("/"):
                 text = text[1:]  # Remove the slash
@@ -222,21 +222,21 @@ def telegram_webhook():
             if response:
                 send_telegram_message(chat_id, response)
 
-        elif "photo" in msg:
+            elif "photo" in msg:
             # Handle photo message (with optional caption text)
-            photos = msg["photo"]
+                photos = msg["photo"]
             file_id = photos[-1]["file_id"]  # Get the largest photo
-            file_path = get_telegram_file_path(file_id)
+                file_path = get_telegram_file_path(file_id)
             
             # Extract caption text if present
             caption_text = msg.get('caption', None)
             
-            if file_path:
+                if file_path:
                 telegram_token = app.config.get('TELEGRAM_BOT_TOKEN')
                 file_url = f"https://api.telegram.org/file/bot{telegram_token}/{file_path}"
-                image_base64 = download_telegram_image(file_url)
+                    image_base64 = download_telegram_image(file_url)
                 
-                if image_base64:
+                    if image_base64:
                     response = message_processor.handle_image_message(chat_id, image_base64, "telegram", caption_text)
                     if response:
                         send_telegram_message(chat_id, response)
@@ -245,11 +245,11 @@ def telegram_webhook():
             else:
                 send_telegram_message(chat_id, IMAGE_ERROR_MSG)
 
-        elif "location" in msg:
+            elif "location" in msg:
             # Handle location message
-            latitude = msg["location"]["latitude"]
-            longitude = msg["location"]["longitude"]
-            
+                latitude = msg["location"]["latitude"]
+                longitude = msg["location"]["longitude"]
+                
             response = message_processor.handle_location_message(chat_id, latitude, longitude, "telegram")
             if response:
                 send_telegram_message(chat_id, response)
