@@ -51,11 +51,11 @@ class MedicalAgentSystem:
     
     def __init__(self):
         """Initialize the medical agent system"""
-        self.llm = self._setup_llm()
         self.tools = MEDICAL_TOOLS
         self.tools_by_name = {tool.name: tool for tool in self.tools}
-        self.graph = self._build_agent_graph()
         self.memory = MemorySaver()
+        self.llm = self._setup_llm()
+        self.graph = self._build_agent_graph()
         
     def _setup_llm(self) -> ChatGoogleGenerativeAI:
         """Setup the LLM with medical context"""
@@ -64,9 +64,10 @@ class MedicalAgentSystem:
             raise ValueError("GEMINI_API_KEY not found in configuration")
             
         return ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash-exp",
+            model="gemini-2.0-flash-exp",
             google_api_key=SecretStr(api_key),
             temperature=0.1,
+            max_output_tokens=2048,
             convert_system_message_to_human=True
         ).bind_tools(self.tools)
     
