@@ -97,6 +97,23 @@ def init_database():
             )
         ''')
         
+        # Follow-up reminders table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS follow_up_reminders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                symptoms TEXT NOT NULL,
+                diagnosis_id INTEGER NOT NULL,
+                scheduled_time DATETIME NOT NULL,
+                sent BOOLEAN DEFAULT FALSE,
+                response_received BOOLEAN DEFAULT FALSE,
+                user_response TEXT,
+                timestamp DATETIME NOT NULL,
+                FOREIGN KEY (diagnosis_id) REFERENCES symptom_history(id)
+            )
+        ''')
+        
         conn.commit()
         conn.close()
         print("✅ Database initialized successfully")

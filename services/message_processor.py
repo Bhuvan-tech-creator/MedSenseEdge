@@ -1,209 +1,320 @@
-"""Message processor service for handling user inputs and orchestrating medical analysis"""
+"""
+Message processor using LangGraph Medical Agent System
+Replaces simple LLM calls with sophisticated tool orchestration
+"""
 
-from models.user import (
-    get_user_history, get_history_id, save_feedback, save_user_location, 
-    save_user_country, get_user_country
-)
-from services.medical_analysis import get_medical_analysis_service
-from services.external_apis import reverse_geocode, find_nearby_clinics, check_disease_outbreaks_for_user
+import asyncio
+from services.medical_agent import get_medical_agent_system
 from services.session_service import get_session_service
-from utils.constants import *
-from utils.helpers import (
-    format_history_text, is_country_mention, contains_symptom_keywords,
-    format_clinic_recommendations
-)
+from services.external_apis import reverse_geocode
+from utils.constants import WELCOME_MSG, PROFILE_SETUP_MSG, AGE_REQUEST_MSG, GENDER_REQUEST_MSG
+from models.user import is_followup_response_expected
+from services.followup_service import get_followup_service
 
 
 class MessageProcessor:
-    """Service for processing user messages and coordinating responses"""
+    """
+    Advanced message processor using LangGraph medical agent system
+    
+    Features:
+    - Tool-based medical analysis instead of simple LLM chains
+    - Adaptive routing between multiple specialized tools
+    - Context-aware conversation management
+    - Multi-modal support (text + images)
+    - Location-aware clinic finding
+    - Disease outbreak monitoring
+    - Web search integration for latest medical information
+    - 24-hour follow-up tracking
+    """
     
     def __init__(self):
+        """Initialize the message processor with agent system"""
         self.session_service = get_session_service()
-        self.medical_service = None
+        
+    def _get_agent_system(self):
+        """Get the medical agent system instance"""
+        return get_medical_agent_system()
     
-    def get_medical_service(self):
-        """Lazy load medical analysis service"""
-        if self.medical_service is None:
-            self.medical_service = get_medical_analysis_service()
-        return self.medical_service
-    
-    def handle_text_message(self, user_id, text, platform):
-        """Handle text message from user"""
-        session = self.session_service.get_session(user_id)
+    def handle_text_message(self, sender, text, platform):
+        """
+        Handle text messages using the LangGraph medical agent
         
-        # Check if user is setting up profile
-        if self.session_service.is_setting_up_profile(user_id):
-            self.session_service.handle_profile_setup(user_id, text, platform)
-            return
-        
-        # Check if new user needs profile setup
-        if self.session_service.should_start_profile_setup(user_id, text):
-            self.session_service.start_profile_setup(user_id, platform)
-            return
-        
-        # Handle special commands
-        response = self._handle_special_commands(user_id, text, session)
-        if response:
-            return response
-        
-        # Handle country detection
-        country_response = self._handle_country_detection(user_id, text, platform)
-        if country_response:
-            return country_response
-        
-        # Handle regular symptom text
-        session["text"] = text
-        return self._handle_partial_input(user_id, session)
-    
-    def handle_image_message(self, user_id, image_base64, platform):
-        """Handle image message from user"""
-        # Check if new user needs profile setup
-        if self.session_service.should_start_profile_setup(user_id):
-            self.session_service.start_profile_setup(user_id, platform)
-            return
-        
-        session = self.session_service.get_session(user_id)
-        session["image"] = image_base64
-        return self._handle_partial_input(user_id, session)
-    
-    def handle_location_message(self, user_id, latitude, longitude, platform):
-        """Handle location sharing from user"""
-        # Get address from coordinates
-        address = reverse_geocode(latitude, longitude)
-        
-        session = self.session_service.get_session(user_id)
-        
-        # Check if we're waiting for location after diagnosis
-        if self.session_service.is_awaiting_location(user_id):
-            # Provide clinic recommendations only
-            clinics = find_nearby_clinics(latitude, longitude)
-            save_user_location(user_id, latitude, longitude, address, platform)
+        Replaces simple LLM calls with sophisticated tool orchestration:
+        - Intent analysis and classification
+        - Intelligent tool selection and execution
+        - Safety checking and emergency detection
+        - Response synthesis from multiple sources
+        - Follow-up response handling
+        """
+        try:
+            # Check if this is a response to a 24-hour follow-up
+            if is_followup_response_expected(sender):
+                followup_service = get_followup_service()
+                return followup_service.handle_followup_response(sender, text)
             
-            clinic_response = format_clinic_recommendations(clinics, address)
-            self.session_service.set_awaiting_location(user_id, False)
+            # Check if user needs profile setup
+            if self.session_service.should_start_profile_setup(sender):
+                self.session_service.start_profile_setup(sender, platform)
+                return PROFILE_SETUP_MSG
             
-            return clinic_response
-        else:
-            # Regular location sharing during symptom input
-            location_data = {"lat": latitude, "lon": longitude, "address": address}
-            session["location"] = location_data
-            save_user_location(user_id, latitude, longitude, address, platform)
+            # Handle profile setup flow
+            if self.session_service.is_in_profile_setup(sender):
+                return self._handle_profile_setup(sender, text, platform)
             
-            return LOCATION_RECEIVED_MSG.format(address=address)
-    
-    def _handle_special_commands(self, user_id, text, session):
-        """Handle special commands like help, emergency, history, etc."""
-        text_lower = text.lower()
-        
-        if text_lower == "help":
-            return HELP_MSG
-        elif text_lower == "emergency":
-            return EMERGENCY_MSG
-        elif text_lower == "history":
-            history = get_user_history(user_id)
-            return format_history_text(history)
-        elif text_lower == "clear":
-            self.session_service.clear_session(user_id)
-            return SESSION_CLEARED_MSG
-        elif text_lower == "proceed":
-            return self._process_user_input(user_id, session)
-        elif text_lower in ["good", "bad"]:
-            return self._handle_feedback(user_id, text_lower)
-        
-        return None
-    
-    def _handle_country_detection(self, user_id, text, platform):
-        """Handle country name detection and save"""
-        if not get_user_country(user_id) and is_country_mention(text, COUNTRY_KEYWORDS):
-            country_name = text.title()
-            save_user_country(user_id, country_name, platform)
+            # Process through LangGraph medical agent system
+            agent_system = self._get_agent_system()
             
-            # Check for disease outbreaks
-            outbreaks = check_disease_outbreaks_for_user(user_id)
-            if outbreaks:
-                return f"🌍 Thank you! I've saved {country_name} as your country.\n\n⚠️ Disease Alert: There are {len(outbreaks)} disease outbreak(s) currently reported in {country_name}. Stay informed and follow local health guidelines.\n\nFeel free to ask about symptoms or type 'history' to see past consultations."
-            else:
-                return f"🌍 Thank you! I've saved {country_name} as your country. I'll notify you of any disease outbreaks in your area.\n\nFeel free to ask about symptoms or type 'history' to see past consultations."
-        
-        return None
-    
-    def _handle_feedback(self, user_id, feedback):
-        """Handle user feedback on diagnosis"""
-        history = get_user_history(user_id, days_back=1)
-        if history:
-            history_id = get_history_id(user_id, history[0][2])
-            if history_id:
-                save_feedback(user_id, history_id, feedback)
-                return FEEDBACK_THANKS_MSG.format(feedback=feedback)
-            else:
-                return NO_RECENT_DIAGNOSIS_MSG
-        else:
-            return NO_RECENT_DIAGNOSIS_MSG
-    
-    def _handle_partial_input(self, user_id, session):
-        """Handle partial input (text only or image only)"""
-        text = session.get("text")
-        image = session.get("image")
-        location = session.get("location")
-        
-        location_prompt = ""
-        if location:
-            location_prompt = f"\n📍 Location: {location['address']}"
-        
-        if text and not image:
-            # Generate language-aware response for text-only case
-            medical_service = self.get_medical_service()
-            template = TEXT_ONLY_TEMPLATE.format(text=text, location=location_prompt)
-            return medical_service.generate_language_aware_response(text, template)
-        elif image and not text:
-            # For image-only, ask for text in English (no user text to detect from)
-            return IMAGE_ONLY_TEMPLATE.format(location=location_prompt)
-        else:
-            # Both available - proceed with analysis
-            return self._process_user_input(user_id, session)
-    
-    def _process_user_input(self, user_id, session):
-        """Process user input for medical analysis"""
-        text = session.get("text")
-        image = session.get("image")
-        
-        if not text and not image:
-            return DEFAULT_SYMPTOMS_PROMPT
-        
-        medical_service = self.get_medical_service()
-        user_country = get_user_country(user_id)
-        
-        # Perform medical analysis based on available input
-        if text and image:
-            reply = medical_service.analyze_combined_symptoms(user_id, text, image)
-        elif text and not image:
-            reply = medical_service.analyze_text_symptoms(user_id, text)
-        elif image and not text:
-            reply = medical_service.analyze_image_symptoms(user_id, image)
-        else:
-            return DEFAULT_SYMPTOMS_PROMPT
-        
-        # Clear session after analysis
-        self.session_service.clear_session(user_id)
-        self.session_service.set_awaiting_location(user_id, True)
-        
-        # Add disease outbreak alerts if applicable
-        if user_country:
-            outbreaks = check_disease_outbreaks_for_user(user_id)
-            if outbreaks:
-                medical_service = self.get_medical_service()
-                outbreak_text = medical_service.generate_language_aware_response(
-                    text or "symptoms", 
-                    f"⚠️ Disease Alert: There are {len(outbreaks)} disease outbreak(s) reported in {user_country}."
+            # Run async agent processing in sync context
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result = loop.run_until_complete(
+                    agent_system.analyze_medical_query(
+                        user_id=sender,
+                        message=text,
+                        image_data=None,
+                        location=None,
+                        emergency=False
+                    )
                 )
-                reply += f"\n\n{outbreak_text}"
+                
+                # Extract response from result
+                if result.get("success"):
+                    return result.get("analysis", "I couldn't analyze your query. Please try again.")
+                else:
+                    return result.get("fallback_message", "I encountered an issue. Please try again.")
+                    
+            finally:
+                loop.close()
+            
+        except Exception as e:
+            print(f"Error processing text message: {e}")
+            return "I apologize, but I'm experiencing technical difficulties. Please try again or consult a healthcare professional if your concern is urgent."
+    
+    def handle_image_message(self, sender, image_base64, platform, caption_text=None):
+        """
+        Handle image messages using the LangGraph medical agent
         
-        return reply + FEEDBACK_PROMPT
+        Features advanced multi-modal analysis:
+        - Computer vision medical image analysis
+        - Integration with user profile and history
+        - Clinical database validation
+        - Safety checking for emergency conditions
+        - Support for image + text combinations
+        """
+        try:
+            # Check if user needs profile setup
+            if self.session_service.should_start_profile_setup(sender):
+                self.session_service.start_profile_setup(sender, platform)
+                return PROFILE_SETUP_MSG
+            
+            # Handle profile setup flow
+            if self.session_service.is_in_profile_setup(sender):
+                return "Please complete your profile setup first before sending images."
+            
+            # Process image through LangGraph medical agent system
+            agent_system = self._get_agent_system()
+            
+            # Use provided text or create default message
+            if caption_text and caption_text.strip():
+                image_message = caption_text.strip()
+            else:
+                image_message = "Please analyze this medical image for any health concerns."
+            
+            # Run async agent processing in sync context
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result = loop.run_until_complete(
+                    agent_system.analyze_medical_query(
+                        user_id=sender,
+                        message=image_message,
+                        image_data=image_base64,
+                        location=None,
+                        emergency=False
+                    )
+                )
+                
+                # Extract response from result
+                if result.get("success"):
+                    return result.get("analysis", "I couldn't analyze the image. Please try again.")
+                else:
+                    return result.get("fallback_message", "I couldn't analyze the image. Please try again.")
+                    
+            finally:
+                loop.close()
+            
+        except Exception as e:
+            print(f"Error processing image message: {e}")
+            return "I couldn't analyze the image. Please try sending it again or describe your symptoms in text."
+    
+    def handle_location_message(self, sender, latitude, longitude, platform):
+        """
+        Handle location messages using the LangGraph medical agent
+        
+        Features location-aware medical services:
+        - Nearby clinic and hospital finder
+        - Location-specific disease outbreak alerts
+        - Emergency services information
+        - Travel health advisories
+        """
+        try:
+            # Check if user needs profile setup
+            if self.session_service.should_start_profile_setup(sender):
+                self.session_service.start_profile_setup(sender, platform)
+                return PROFILE_SETUP_MSG
+            
+            # Handle profile setup flow
+            if self.session_service.is_in_profile_setup(sender):
+                return "Please complete your profile setup first before sharing location."
+            
+            # Get location name for context
+            location_name = reverse_geocode(latitude, longitude)
+            
+            # Create message requesting clinic information
+            location_message = f"Please find medical facilities and health information for my current location: {location_name}. Also check for any disease outbreaks in this area."
+            
+            # Process through LangGraph medical agent system
+            agent_system = self._get_agent_system()
+            
+            # Run async agent processing in sync context
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result = loop.run_until_complete(
+                    agent_system.analyze_medical_query(
+                        user_id=sender,
+                        message=location_message,
+                        image_data=None,
+                        location=location_name,
+                        emergency=False
+                    )
+                )
+                
+                # Extract response from result
+                if result.get("success"):
+                    return result.get("analysis", "I couldn't process your location. Please try again.")
+                else:
+                    return result.get("fallback_message", "I couldn't process your location. Please try again.")
+                    
+            finally:
+                loop.close()
+            
+        except Exception as e:
+            print(f"Error processing location message: {e}")
+            return "I couldn't process your location. Please try again or describe where you're looking for medical facilities."
+    
+    def _handle_profile_setup(self, sender, text, platform):
+        """
+        Handle profile setup flow with enhanced user experience
+        
+        Features:
+        - Natural language processing for age/gender extraction
+        - Validation and error handling
+        - Multi-language support
+        - Platform-specific formatting
+        """
+        try:
+            setup_step = self.session_service.get_profile_setup_step(sender)
+            
+            if setup_step == "age":
+                # Enhanced age processing with natural language understanding
+                age = self._extract_age_from_text(text)
+                if age:
+                    self.session_service.save_age(sender, age)
+                    self.session_service.set_profile_setup_step(sender, "gender")
+                    return GENDER_REQUEST_MSG
+                else:
+                    return "Please provide a valid age (e.g., '25' or 'I am 25 years old')."
+            
+            elif setup_step == "gender":
+                # Enhanced gender processing with flexible input recognition
+                gender = self._extract_gender_from_text(text)
+                if gender:
+                    self.session_service.save_gender(sender, gender)
+                    self.session_service.complete_profile_setup(sender)
+                    
+                    welcome_message = f"✅ Profile setup complete!\n\n🤖 I'm MedSense AI, your personal medical assistant powered by advanced tool orchestration. I can help you with:\n\n🔍 Intelligent symptom analysis\n📸 Medical image analysis\n🌐 Latest medical research\n🏥 Nearby clinics & hospitals\n⚠️ Disease outbreak alerts\n🩺 Clinical validation\n\nHow can I help you today?"
+                    
+                    return welcome_message
+                else:
+                    return "Please specify your gender (e.g., 'male', 'female', 'other', or 'prefer not to say')."
+            
+            return "Please complete your profile setup."
+            
+        except Exception as e:
+            print(f"Error in profile setup: {e}")
+            return "There was an error setting up your profile. Please try again."
+    
+    def _extract_age_from_text(self, text):
+        """Extract age from user text with natural language processing"""
+        try:
+            # Simple extraction logic - can be enhanced with NLP
+            import re
+            
+            # Look for numbers in the text
+            numbers = re.findall(r'\b\d+\b', text)
+            
+            for num_str in numbers:
+                age = int(num_str)
+                # Reasonable age range validation
+                if 1 <= age <= 120:
+                    return age
+            
+            # Look for spelled out numbers
+            age_words = {
+                'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+                'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+                'eleven': 11, 'twelve': 12, 'thirteen': 13, 'fourteen': 14, 'fifteen': 15,
+                'sixteen': 16, 'seventeen': 17, 'eighteen': 18, 'nineteen': 19, 'twenty': 20,
+                'thirty': 30, 'forty': 40, 'fifty': 50, 'sixty': 60, 'seventy': 70,
+                'eighty': 80, 'ninety': 90
+            }
+            
+            text_lower = text.lower()
+            for word, value in age_words.items():
+                if word in text_lower:
+                    return value
+            
+            return None
+            
+        except Exception as e:
+            print(f"Error extracting age: {e}")
+            return None
+    
+    def _extract_gender_from_text(self, text):
+        """Extract gender from user text with flexible recognition"""
+        try:
+            text_lower = text.lower().strip()
+            
+            # Direct matches
+            if any(word in text_lower for word in ['male', 'man', 'boy', 'masculine']):
+                return 'male'
+            elif any(word in text_lower for word in ['female', 'woman', 'girl', 'feminine']):
+                return 'female'
+            elif any(word in text_lower for word in ['other', 'non-binary', 'nonbinary', 'nb']):
+                return 'other'
+            elif any(word in text_lower for word in ['prefer not', 'not say', 'private', 'none']):
+                return 'prefer_not_to_say'
+            
+            # Single letter recognition
+            if text_lower in ['m', 'f', 'o', 'n']:
+                mapping = {'m': 'male', 'f': 'female', 'o': 'other', 'n': 'prefer_not_to_say'}
+                return mapping[text_lower]
+            
+            return None
+            
+        except Exception as e:
+            print(f"Error extracting gender: {e}")
+            return None
 
 
-# Global message processor instance
-message_processor = MessageProcessor()
+# Global instance
+message_processor = None
 
 def get_message_processor():
-    """Get message processor instance"""
+    """Get or create message processor instance"""
+    global message_processor
+    if message_processor is None:
+        message_processor = MessageProcessor()
     return message_processor 

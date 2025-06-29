@@ -105,13 +105,62 @@ def format_clinic_recommendations(clinics, address):
     clinic_text = f"📍 Based on your location ({address}), here are the nearest medical facilities:\n\n"
     
     for i, clinic in enumerate(clinics, 1):
-        # Generate Google Maps link
-        maps_link = f"https://www.google.com/maps/search/?api=1&query={clinic['lat']},{clinic['lon']}"
+        # Enhanced Google Maps links
+        # 1. Search by name and location for better accuracy
+        clinic_name_encoded = clinic['name'].replace(' ', '+').replace('&', 'and')
+        search_link = f"https://www.google.com/maps/search/?api=1&query={clinic_name_encoded}+near+{clinic['lat']},{clinic['lon']}"
+        
+        # 2. Direct navigation/directions link
+        directions_link = f"https://www.google.com/maps/dir/?api=1&destination={clinic['lat']},{clinic['lon']}&destination_place_id={clinic_name_encoded}"
+        
+        # 3. Simple coordinate-based link as fallback
+        coordinate_link = f"https://www.google.com/maps/search/?api=1&query={clinic['lat']},{clinic['lon']}"
+        
         clinic_text += (f"{i}. **{clinic['name']}** ({clinic['type'].title()})\n"
                        f"   📍 {clinic['distance']}km away\n"
-                       f"   🗺️ [Open in Maps]({maps_link})\n\n")
+                       f"   🗺️ [View on Maps]({search_link}) | [Get Directions]({directions_link})\n\n")
     
-    clinic_text += ("Visit the most appropriate facility based on your symptoms' urgency.\n\n"
+    clinic_text += ("💡 **Tips:**\n"
+                   "• Tap 'View on Maps' to see the facility location\n"
+                   "• Tap 'Get Directions' for turn-by-turn navigation\n"
+                   "• Call ahead to confirm hours and availability\n\n"
+                   "Visit the most appropriate facility based on your symptoms' urgency.\n\n"
                    "Feel free to ask about new symptoms or type 'history' to see past consultations.")
     
-    return clinic_text 
+    return clinic_text
+
+
+def format_clinic_data_with_maps(clinic_data):
+    """Format clinic data from JSON with Google Maps links for medical agent responses"""
+    try:
+        if isinstance(clinic_data, str):
+            import json
+            clinic_data = json.loads(clinic_data)
+        
+        facilities = clinic_data.get('facilities', [])
+        location = clinic_data.get('location', 'your location')
+        
+        if not facilities:
+            return f"📍 No medical facilities found within the search radius near {location}. I recommend visiting your nearest clinic or hospital for medical care."
+        
+        response = f"📍 **Medical Facilities Near You** ({location}):\n\n"
+        
+        for i, facility in enumerate(facilities, 1):
+            # Enhanced Google Maps links
+            facility_name_encoded = facility['name'].replace(' ', '+').replace('&', 'and')
+            search_link = f"https://www.google.com/maps/search/?api=1&query={facility_name_encoded}+near+{facility['lat']},{facility['lon']}"
+            directions_link = f"https://www.google.com/maps/dir/?api=1&destination={facility['lat']},{facility['lon']}"
+            
+            response += (f"{i}. **{facility['name']}** ({facility['type'].title()})\n"
+                        f"   📍 {facility['distance']}km away\n"
+                        f"   🗺️ [View on Maps]({search_link}) | [Get Directions]({directions_link})\n\n")
+        
+        response += ("💡 **Navigation Tips:**\n"
+                    "• Tap 'View on Maps' to see facility details\n"
+                    "• Tap 'Get Directions' for turn-by-turn navigation\n"
+                    "• Consider calling ahead to confirm hours and availability\n\n")
+        
+        return response
+        
+    except Exception as e:
+        return f"📍 I found medical facilities near you, but couldn't format the information properly. Please try sharing your location again." 

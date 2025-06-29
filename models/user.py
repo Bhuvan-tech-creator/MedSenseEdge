@@ -136,9 +136,17 @@ def save_diagnosis_to_history(user_id, platform, symptoms, diagnosis, body_part=
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (user_id, platform, symptoms, diagnosis, datetime.now(), body_part, severity, lat, lon, address))
         history_id = cursor.lastrowid
+        
+        # Schedule 24-hour follow-up reminder
+        followup_time = datetime.now() + timedelta(hours=24)
+        cursor.execute('''
+            INSERT INTO follow_up_reminders (user_id, platform, symptoms, diagnosis_id, scheduled_time, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user_id, platform, symptoms, history_id, followup_time, datetime.now()))
+        
         conn.commit()
         conn.close()
-        print(f"Saved diagnosis to history for user {user_id}")
+        print(f"Saved diagnosis to history for user {user_id} with 24h follow-up scheduled")
         return history_id
     except Exception as e:
         print(f"Error saving to database: {e}")
@@ -195,4 +203,80 @@ def save_feedback(user_id, history_id, feedback):
         conn.close()
         print(f"Saved feedback for user {user_id}, history_id {history_id}")
     except Exception as e:
-        print(f"Error saving feedback: {e}") 
+        print(f"Error saving feedback: {e}")
+
+
+def get_pending_followups():
+    """Get all pending follow-up reminders that are due"""
+    try:
+        conn = sqlite3.connect('medsense_history.db')
+        cursor = conn.cursor()
+        current_time = datetime.now()
+        cursor.execute('''
+            SELECT id, user_id, platform, symptoms, diagnosis_id, scheduled_time
+            FROM follow_up_reminders 
+            WHERE sent = FALSE AND scheduled_time <= ?
+            ORDER BY scheduled_time ASC
+        ''', (current_time,))
+        followups = cursor.fetchall()
+        conn.close()
+        return followups
+    except Exception as e:
+        print(f"Error retrieving pending follow-ups: {e}")
+        return []
+
+
+def mark_followup_sent(followup_id):
+    """Mark a follow-up reminder as sent"""
+    try:
+        conn = sqlite3.connect('medsense_history.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE follow_up_reminders 
+            SET sent = TRUE 
+            WHERE id = ?
+        ''', (followup_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error marking follow-up as sent: {e}")
+        return False
+
+
+def save_followup_response(user_id, response_text):
+    """Save user's response to a follow-up check-in"""
+    try:
+        conn = sqlite3.connect('medsense_history.db')
+        cursor = conn.cursor()
+        # Find the most recent sent follow-up for this user that hasn't received a response
+        cursor.execute('''
+            UPDATE follow_up_reminders 
+            SET response_received = TRUE, user_response = ?
+            WHERE user_id = ? AND sent = TRUE AND response_received = FALSE
+            ORDER BY scheduled_time DESC
+            LIMIT 1
+        ''', (response_text, user_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error saving follow-up response: {e}")
+        return False
+
+
+def is_followup_response_expected(user_id):
+    """Check if a follow-up response is expected from this user"""
+    try:
+        conn = sqlite3.connect('medsense_history.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT COUNT(*) FROM follow_up_reminders 
+            WHERE user_id = ? AND sent = TRUE AND response_received = FALSE
+        ''', (user_id,))
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count > 0
+    except Exception as e:
+        print(f"Error checking follow-up response status: {e}")
+        return False 

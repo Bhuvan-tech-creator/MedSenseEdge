@@ -5,6 +5,32 @@ import time
 from flask import current_app
 from utils.helpers import calculate_distance
 from models.user import get_user_country
+from duckduckgo_search import DDGS
+
+# Simple session cache for EndlessMedical
+_endlessmedical_session = {"session_id": None, "initialized": False}
+
+
+def duckduckgo_search(query, max_results=5):
+    """Search DuckDuckGo for medical information"""
+    try:
+        with DDGS() as ddgs:
+            results = []
+            search_results = ddgs.text(query, max_results=max_results)
+            
+            for result in search_results:
+                results.append({
+                    'title': result.get('title', ''),
+                    'body': result.get('body', ''),
+                    'href': result.get('href', ''),
+                    'source': 'DuckDuckGo'
+                })
+            
+            return results
+            
+    except Exception as e:
+        print(f"Error in DuckDuckGo search: {e}")
+        return [{"error": f"Search failed: {str(e)}"}]
 
 
 def reverse_geocode(latitude, longitude):
@@ -287,4 +313,146 @@ def get_endlessmedical_diagnosis(symptoms_text, user_profile):
         
     except Exception as e:
         print(f"Error getting EndlessMedical diagnosis: {e}")
-        return None 
+        return None
+
+
+def set_endlessmedical_features(features_dict):
+    """
+    Set medical features in EndlessMedical session (LLM-controlled)
+    This allows the LLM to specify exactly which features to set
+    """
+    global _endlessmedical_session
+    
+    try:
+        endlessmedical_url = current_app.config.get('ENDLESSMEDICAL_API_URL')
+        
+        # Initialize session if needed
+        if not _endlessmedical_session["initialized"]:
+            session_response = requests.get(f"{endlessmedical_url}/InitSession", timeout=10, verify=False)
+            if session_response.status_code != 200:
+                return {"status": "error", "error": "Failed to initialize session"}
+                
+            session_data = session_response.json()
+            if session_data.get('status') != 'ok':
+                return {"status": "error", "error": "Session initialization failed"}
+                
+            session_id = session_data.get('SessionID')
+            if not session_id:
+                return {"status": "error", "error": "No session ID received"}
+            
+            # Accept terms of use
+            terms_passphrase = "I have read, understood and I accept and agree to comply with the Terms of Use of EndlessMedicalAPI and Endless Medical services. The Terms of Use are available on endlessmedical.com"
+            
+            terms_response = requests.post(
+                f"{endlessmedical_url}/AcceptTermsOfUse",
+                params={'SessionID': session_id, 'passphrase': terms_passphrase},
+                timeout=10,
+                verify=False
+            )
+            
+            if terms_response.status_code != 200 or terms_response.json().get('status') != 'ok':
+                return {"status": "error", "error": "Failed to accept terms of use"}
+            
+            _endlessmedical_session["session_id"] = session_id
+            _endlessmedical_session["initialized"] = True
+            print(f"✅ EndlessMedical session initialized: {session_id}")
+        
+        session_id = _endlessmedical_session["session_id"]
+        features_set = []
+        
+        # Set each feature
+        for feature_name, feature_value in features_dict.items():
+            try:
+                response = requests.post(
+                    f"{endlessmedical_url}/UpdateFeature",
+                    params={'SessionID': session_id, 'name': feature_name, 'value': str(feature_value)},
+                    timeout=10,
+                    verify=False
+                )
+                
+                if response.status_code == 200:
+                    features_set.append(f"{feature_name}={feature_value}")
+                    print(f"✅ Set {feature_name} = {feature_value}")
+                else:
+                    print(f"❌ Failed to set {feature_name}: HTTP {response.status_code}")
+                    
+            except Exception as e:
+                print(f"❌ Error setting {feature_name}: {e}")
+        
+        return {
+            "status": "success",
+            "session_id": session_id,
+            "features_set": features_set,
+            "total_features": len(features_set)
+        }
+        
+    except Exception as e:
+        print(f"Error setting EndlessMedical features: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+def analyze_endlessmedical_session():
+    """
+    Analyze the current EndlessMedical session
+    Should be called after set_endlessmedical_features
+    """
+    global _endlessmedical_session
+    
+    try:
+        if not _endlessmedical_session["initialized"] or not _endlessmedical_session["session_id"]:
+            return {"status": "error", "error": "No active session. Call set_medical_features first."}
+        
+        endlessmedical_url = current_app.config.get('ENDLESSMEDICAL_API_URL')
+        session_id = _endlessmedical_session["session_id"]
+        
+        # Analyze
+        analyze_response = requests.get(
+            f"{endlessmedical_url}/Analyze",
+            params={'SessionID': session_id},
+            timeout=15,
+            verify=False
+        )
+        
+        if analyze_response.status_code == 200:
+            analyze_data = analyze_response.json()
+            if analyze_data.get('status') == 'ok':
+                diseases = analyze_data.get('Diseases', [])
+                
+                if diseases:
+                    # Convert to standard format
+                    conditions = []
+                    for disease_dict in diseases[:5]:  # Top 5
+                        for disease_name, probability in disease_dict.items():
+                            conditions.append({
+                                'name': disease_name,
+                                'probability': float(probability),
+                                'common_name': disease_name
+                            })
+                    
+                    print(f"✅ EndlessMedical analysis: {len(conditions)} conditions found")
+                    
+                    # Clear session for next use
+                    _endlessmedical_session["initialized"] = False
+                    _endlessmedical_session["session_id"] = None
+                    
+                    return {
+                        'conditions': conditions,
+                        'status': 'success',
+                        'date': time.strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                else:
+                    print("ℹ️ EndlessMedical analysis completed but no diseases found")
+                    return {
+                        'conditions': [],
+                        'status': 'no_conditions'
+                    }
+            else:
+                print(f"❌ EndlessMedical analysis failed: {analyze_data}")
+                return {"status": "error", "error": f"Analysis failed: {analyze_data}"}
+        else:
+            print(f"❌ EndlessMedical analysis HTTP error: {analyze_response.status_code}")
+            return {"status": "error", "error": f"HTTP error: {analyze_response.status_code}"}
+        
+    except Exception as e:
+        print(f"Error analyzing EndlessMedical session: {e}")
+        return {"status": "error", "error": str(e)} 

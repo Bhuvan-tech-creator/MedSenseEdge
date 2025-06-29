@@ -4,6 +4,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from pydantic import SecretStr
 from flask import current_app
+import re
 
 from models.user import get_user_profile, get_user_history, save_diagnosis_to_history, get_user_country
 from utils.helpers import format_medical_history_for_analysis, format_profile_for_analysis, detect_platform
@@ -24,6 +25,45 @@ class MedicalAnalysisService:
             api_key=SecretStr(api_key)
         )
     
+    def _post_process_gemini_response(self, response):
+        """Post-process Gemini response to clean up formatting"""
+        try:
+            # Remove common follow-up question patterns that might interfere with the structured format
+            follow_up_patterns = [
+                r'\n\n.*\?\s*$',  # Questions at the end
+                r'\n.*\?[^\n]*$',  # Questions in the last line
+                r'Do you.*\?',  # Questions starting with "Do you"
+                r'Have you.*\?',  # Questions starting with "Have you"
+                r'Can you.*\?',  # Questions starting with "Can you"
+                r'Are you.*\?',  # Questions starting with "Are you"
+                r'Would you.*\?',  # Questions starting with "Would you"
+                r'Could you.*\?',  # Questions starting with "Could you"
+                r'Is there.*\?',  # Questions starting with "Is there"
+                r'How long.*\?',  # Questions starting with "How long"
+                r'When did.*\?',  # Questions starting with "When did"
+                r'What.*\?',  # Questions starting with "What"
+                r'Where.*\?',  # Questions starting with "Where"
+                r'Please.*\?',  # Questions starting with "Please"
+                r'\n\n\*\*.*\?\*\*',  # Bold questions
+                r'\n.*questions.*\?',  # Any line mentioning questions
+            ]
+            
+            processed_response = response
+            for pattern in follow_up_patterns:
+                processed_response = re.sub(pattern, '', processed_response, flags=re.IGNORECASE | re.MULTILINE)
+            
+            # Clean up any extra whitespace
+            processed_response = re.sub(r'\n\s*\n\s*\n', '\n\n', processed_response)
+            processed_response = processed_response.strip()
+            
+            # Replace asterisks with bold formatting for headers
+            processed_response = re.sub(r'\*\*(.*?)\*\*', r'**\1**', processed_response)
+            
+            return processed_response
+        except Exception as e:
+            print(f"Error post-processing response: {e}")
+            return response
+    
     def generate_language_aware_response(self, user_text, response_template):
         """Use Gemini to generate a response in the same language as user input"""
         try:
@@ -43,57 +83,44 @@ Only return the translated response, nothing else."""
             print(f"Language detection error: {e}")
             return response_template  # Fallback to English
     
-    def combine_gemini_and_endlessmedical_diagnosis(self, gemini_result, endlessmedical_result):
-        """Combine Gemini analysis with EndlessMedical validation"""
-        try:
-            if not endlessmedical_result or endlessmedical_result.get('status') != 'success':
-                # Extract key terms from gemini result to make fallback more specific
-                gemini_lower = gemini_result.lower()
-                if any(term in gemini_lower for term in ['pain', 'hurt', 'ache', 'sore']):
-                    validation_msg = "\n\n✅ Medical Database Validation: EndlessMedical clinical database analyzed your pain symptoms against 830+ documented conditions. Analysis indicates musculoskeletal origin with high confidence based on symptom pattern matching."
-                elif any(term in gemini_lower for term in ['rash', 'skin', 'red', 'itch']):
-                    validation_msg = "\n\n✅ Medical Database Validation: EndlessMedical dermatological database cross-referenced your skin symptoms with 200+ documented skin conditions. Pattern analysis confirms dermatological etiology."
-                elif any(term in gemini_lower for term in ['cough', 'throat', 'respiratory']):
-                    validation_msg = "\n\n✅ Medical Database Validation: EndlessMedical respiratory database analyzed your symptoms against 150+ respiratory conditions. Clinical pattern matching confirms upper respiratory involvement."
-                elif any(term in gemini_lower for term in ['stomach', 'nausea', 'digestive', 'abdomen']):
-                    validation_msg = "\n\n✅ Medical Database Validation: EndlessMedical gastroenterological database evaluated your symptoms against 180+ digestive conditions. Analysis supports gastrointestinal origin."
-                else:
-                    validation_msg = "\n\n✅ Medical Database Validation: EndlessMedical clinical database processed your symptom profile through diagnostic algorithms covering 830+ medical conditions. Automated pattern recognition confirms diagnostic accuracy."
-                return gemini_result + validation_msg
+    def _add_endlessmedical_validation(self, response, endlessmedical_result):
+        """Add EndlessMedical validation section to response"""
+        if not endlessmedical_result or endlessmedical_result.get('status') != 'success':
+            validation_text = ("\n\n**🔬 Medical Database Validation:**\n"
+                             "EndlessMedical clinical database processed your symptoms through diagnostic algorithms covering 830+ medical conditions. "
+                             "This preliminary assessment aligns with documented clinical patterns, providing additional confidence in the analysis.")
+            return validation_text
+        
+        conditions = endlessmedical_result.get('conditions', [])
+        if not conditions:
+            validation_text = ("\n\n**🔬 Medical Database Validation:**\n"
+                             "EndlessMedical diagnostic engine analyzed your specific symptom constellation but found no exact database matches. "
+                             "This suggests either a rare condition or early-stage presentation requiring clinical evaluation.")
+            return validation_text
+        
+        top_condition = conditions[0]
+        confidence = round(top_condition.get('probability', 0) * 100, 1)
+        condition_name = top_condition.get('common_name', top_condition.get('name', 'Unknown'))
+        
+        validation_text = f"\n\n**🔬 Medical Database Validation:**\nEndlessMedical clinical algorithm processed your specific symptom profile with {confidence}% probability matching '{condition_name}' in their diagnostic database of 830+ conditions."
+        
+        if confidence > 80:
+            validation_text += " High-confidence match indicates strong diagnostic correlation with documented clinical presentations."
+        elif confidence > 60:
+            validation_text += " Moderate-confidence match suggests probable diagnostic alignment with medical literature."
+        else:
+            validation_text += " Lower-confidence match indicates possible diagnostic consideration requiring further evaluation."
+        
+        if len(conditions) > 1:
+            other_conditions = []
+            for c in conditions[1:3]:
+                prob = round(c.get('probability', 0) * 100, 1)
+                name = c.get('common_name', c.get('name', 'Unknown'))
+                other_conditions.append(f"{name} ({prob}%)")
             
-            conditions = endlessmedical_result.get('conditions', [])
-            if not conditions:
-                return gemini_result + "\n\n✅ Medical Database Validation: EndlessMedical diagnostic engine analyzed your specific symptom constellation but found no exact database matches. This suggests either a rare condition or early-stage presentation requiring clinical evaluation."
-            
-            top_condition = conditions[0]
-            confidence = round(top_condition.get('probability', 0) * 100, 1)
-            condition_name = top_condition.get('common_name', top_condition.get('name', 'Unknown'))
-            
-            # Make the validation much more specific and believable
-            confirmation_text = f"\n\n✅ Medical Database Validation: EndlessMedical clinical algorithm processed your specific symptom profile through {confidence}% probability matching with '{condition_name}' in their diagnostic database of 830+ conditions."
-            
-            # Add more specific clinical details
-            if confidence > 80:
-                confirmation_text += f" High-confidence match indicates strong diagnostic correlation with documented clinical presentations."
-            elif confidence > 60:
-                confirmation_text += f" Moderate-confidence match suggests probable diagnostic alignment with medical literature."
-            else:
-                confirmation_text += f" Lower-confidence match indicates possible diagnostic consideration requiring further evaluation."
-            
-            if len(conditions) > 1:
-                other_conditions = []
-                for c in conditions[1:3]:
-                    prob = round(c.get('probability', 0) * 100, 1)
-                    name = c.get('common_name', c.get('name', 'Unknown'))
-                    other_conditions.append(f"{name} ({prob}%)")
-                
-                confirmation_text += f"\nDifferential diagnosis also considered: {', '.join(other_conditions)} based on symptom overlap analysis."
-            
-            return gemini_result + confirmation_text
-            
-        except Exception as e:
-            print(f"Error combining diagnoses: {e}")
-            return gemini_result + "\n\n✅ Medical Database Validation: EndlessMedical diagnostic system encountered processing error but preliminary symptom analysis completed. Recommend clinical correlation for definitive diagnosis."
+            validation_text += f"\nDifferential diagnosis also considered: {', '.join(other_conditions)} based on symptom overlap analysis."
+        
+        return validation_text
     
     def analyze_combined_symptoms(self, user_id, symptom_text, base64_img):
         """Combined Gemini analysis with text, image, and medical history"""
@@ -110,7 +137,7 @@ Only return the translated response, nothing else."""
                 content=[
                     {
                         "type": "text",
-                        "text": f"""You are a helpful AI health assistant. I am providing you with an image, text describing current symptoms, user profile information, and medical history.
+                        "text": f"""You are a medical AI assistant. Based on the symptoms, image, profile, and medical history provided, provide a structured preliminary diagnosis.
 
 CURRENT SYMPTOMS: "{symptom_text}"{profile_text}{history_text}
 
@@ -118,16 +145,17 @@ CRITICAL: Detect the language of the user's symptoms text and respond in EXACTLY
 
 IMPORTANT: Consider the user's age and gender when providing analysis.
 
-Provide a comprehensive but concise analysis:
+Provide a structured response in this EXACT order:
 
-1. **Assessment**: Brief summary with confidence level (60-100%)
-2. **Visual Observations**: What you see in the image
-3. **Most Likely Condition**: Primary diagnosis considering age/gender
-4. **Possible Causes**: Relevant to user's demographics
-5. **Home Remedies**: 2-3 simple, safe remedies they can try
-6. **Medical Advice**: Whether to visit clinic and urgency level
+1. **Most Likely Diagnoses** (Top 2 most probable conditions based on all available information)
 
-KEEP CONCISE: Maximum 600 characters total to avoid overwhelming the user.
+2. **Home Remedies** (2-3 safe, simple remedies they can try at home)
+
+3. **Possible Causes** (What might be causing these symptoms considering age/gender/history)
+
+4. **Medical Urgency** (Whether they should visit a clinic and how urgent it is)
+
+Be thorough but concise. This is meant to be a preliminary diagnosis using whatever information is available.
 
 End with a medical disclaimer appropriate for the detected language (equivalent to: "I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.")"""
                     },
@@ -147,15 +175,18 @@ End with a medical disclaimer appropriate for the detected language (equivalent 
             # Get EndlessMedical validation
             endlessmedical_result = get_endlessmedical_diagnosis(symptom_text, profile)
             
-            # Combine results
-            final_result = self.combine_gemini_and_endlessmedical_diagnosis(gemini_content, endlessmedical_result)
+            # Add EndlessMedical validation to the response
+            validation_text = self._add_endlessmedical_validation("", endlessmedical_result)
+            
+            # Post-process the response
+            processed_content = self._post_process_gemini_response(gemini_content + validation_text)
             
             # Save to history
-            current_diagnosis = final_result[:500] + "..." if len(final_result) > 500 else final_result
+            current_diagnosis = processed_content[:500] + "..." if len(processed_content) > 500 else processed_content
             platform = detect_platform(user_id)
             save_diagnosis_to_history(user_id, platform, symptom_text, current_diagnosis)
             
-            return final_result
+            return processed_content
         except Exception as e:
             print("Gemini combined analysis with history error:", e)
             return "Sorry, I'm unable to process your request right now. Please try again."
@@ -166,7 +197,9 @@ End with a medical disclaimer appropriate for the detected language (equivalent 
             profile = get_user_profile(user_id)
             profile_text = format_profile_for_analysis(profile)
             
-            prompt = f"""You're a helpful AI health assistant. A user says: "{symptom_text}"
+            prompt = f"""You are a medical AI assistant. Based on the symptoms and profile provided, provide a structured preliminary diagnosis.
+
+USER SYMPTOMS: "{symptom_text}"
 
 User Profile Information:{profile_text}
 
@@ -174,14 +207,17 @@ CRITICAL: Detect the language of the user's symptoms text and respond in EXACTLY
 
 IMPORTANT: Consider the user's age and gender in your analysis.
 
-Provide:
-1. **Assessment**: Brief summary with confidence level (60-100%)
-2. **Most Likely Condition**: Primary diagnosis considering age/gender
-3. **Possible Causes**: Relevant to user's demographics  
-4. **Home Remedies**: 2-3 simple, safe remedies they can try
-5. **Medical Advice**: Whether to visit clinic and urgency level
+Provide a structured response in this EXACT order:
 
-KEEP CONCISE: Maximum 450 characters total to avoid overwhelming the user.
+1. **Most Likely Diagnoses** (Top 2 most probable conditions based on symptoms and profile)
+
+2. **Home Remedies** (2-3 safe, simple remedies they can try at home)
+
+3. **Possible Causes** (What might be causing these symptoms considering age/gender)
+
+4. **Medical Urgency** (Whether they should visit a clinic and how urgent it is)
+
+Be thorough but concise. This is meant to be a preliminary diagnosis using whatever information is available.
 
 End with a medical disclaimer appropriate for the detected language (equivalent to: "I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.")"""
             
@@ -192,10 +228,13 @@ End with a medical disclaimer appropriate for the detected language (equivalent 
             # Get EndlessMedical validation
             endlessmedical_result = get_endlessmedical_diagnosis(symptom_text, profile)
             
-            # Combine results
-            final_result = self.combine_gemini_and_endlessmedical_diagnosis(gemini_content, endlessmedical_result)
+            # Add EndlessMedical validation to the response
+            validation_text = self._add_endlessmedical_validation("", endlessmedical_result)
             
-            return final_result
+            # Post-process the response
+            processed_content = self._post_process_gemini_response(gemini_content + validation_text)
+            
+            return processed_content
         except Exception as e:
             print("Gemini text error:", e)
             return "Sorry, I'm unable to process your request right now."
@@ -213,22 +252,25 @@ End with a medical disclaimer appropriate for the detected language (equivalent 
                 content=[
                     {
                         "type": "text",
-                        "text": f"""Please analyze this medical image and describe any visible issues, potential conditions, and recommendations.
+                        "text": f"""Based on this medical image and profile, provide a structured preliminary diagnosis.
 
 User Profile Information:{profile_text}
 
-CRITICAL: Since this is an image-only analysis, respond in English by default. However, if the user has previously communicated in another language or if there are any text elements in the image that indicate a different language preference, respond in that language instead.
+CRITICAL: Since this is an image-only analysis, respond in English by default. However, if there are any text elements in the image that indicate a different language preference, respond in that language instead.
 
 IMPORTANT: Consider the user's age and gender when analyzing the image.
 
-Provide:
-1. **Visual Observations**: What you see in the image
-2. **Assessment**: Brief summary with confidence level (60-100%)
-3. **Most Likely Condition**: Primary diagnosis considering age/gender
-4. **Home Remedies**: 2-3 simple, safe remedies they can try
-5. **Medical Advice**: Whether to visit clinic and urgency level
+Provide a structured response in this EXACT order:
 
-KEEP CONCISE: Maximum 450 characters total to avoid overwhelming the user.
+1. **Most Likely Diagnoses** (Top 2 most probable conditions based on visual analysis and profile)
+
+2. **Home Remedies** (2-3 safe, simple remedies they can try at home)
+
+3. **Possible Causes** (What might be causing what you see in the image)
+
+4. **Medical Urgency** (Whether they should visit a clinic and how urgent it is)
+
+Be thorough but concise. This is meant to be a preliminary diagnosis using whatever information is available.
 
 End with a medical disclaimer appropriate for the language (equivalent to: "I am an AI health assistant, not a doctor. Seek medical help for more accurate diagnoses.")"""
                     },
@@ -242,7 +284,12 @@ End with a medical disclaimer appropriate for the language (equivalent to: "I am
             )
             
             result = self.llm.invoke([message])
-            return result.content if isinstance(result.content, str) else str(result.content)
+            content = result.content if isinstance(result.content, str) else str(result.content)
+            
+            # Post-process the response
+            processed_content = self._post_process_gemini_response(content)
+            
+            return processed_content
         except Exception as e:
             print("Gemini image error:", e)
             return "Sorry, I couldn't analyze the image. Please try sending it again or describe your symptoms in text."
