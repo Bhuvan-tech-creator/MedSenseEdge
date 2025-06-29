@@ -138,6 +138,23 @@ def test_telegram_token():
         return False
 
 
+def get_telegram_bot_info():
+    """Get Telegram bot information including username"""
+    try:
+        telegram_token = current_app.config.get('TELEGRAM_BOT_TOKEN')
+        url = f"https://api.telegram.org/bot{telegram_token}/getMe"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('ok'):
+                return data.get('result', {})
+            return None
+        return None
+    except Exception as e:
+        print(f"Error getting bot info: {e}")
+        return None
+
+
 def get_telegram_webhook_info():
     """Get current Telegram webhook information"""
     try:

@@ -2,7 +2,7 @@
 
 from flask import Blueprint, jsonify
 from services.session_service import get_session_service
-from services.message_service import test_telegram_token, get_telegram_webhook_info, set_telegram_webhook
+from services.message_service import test_telegram_token, get_telegram_webhook_info, set_telegram_webhook, get_telegram_bot_info
 
 health_bp = Blueprint('health', __name__)
 
@@ -24,6 +24,15 @@ def test_telegram_endpoint():
     return jsonify({
         "telegram_token_valid": token_works,
         "webhook_info": webhook_info
+    })
+
+
+@health_bp.route("/bot-info", methods=["GET"])
+def get_bot_info():
+    """Get Telegram bot information"""
+    bot_info = get_telegram_bot_info()
+    return jsonify({
+        "bot_info": bot_info
     })
 
 

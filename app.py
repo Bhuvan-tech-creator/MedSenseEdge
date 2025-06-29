@@ -19,7 +19,7 @@ from services.message_service import (
     send_whatsapp_message, send_telegram_message, 
     get_whatsapp_image_url, download_and_encode_whatsapp_image,
     get_telegram_file_path, download_telegram_image,
-    test_telegram_token, get_telegram_webhook_info, set_telegram_webhook
+    test_telegram_token, get_telegram_webhook_info, set_telegram_webhook, get_telegram_bot_info
 )
 from services.message_processor import get_message_processor
 
@@ -53,6 +53,16 @@ def test_telegram_endpoint():
     return jsonify({
         "telegram_token_valid": token_works,
         "webhook_info": webhook_info
+    })
+
+
+# Bot info route
+@app.route("/bot-info", methods=["GET"])
+def get_bot_info():
+    """Get Telegram bot information"""
+    bot_info = get_telegram_bot_info()
+    return jsonify({
+        "bot_info": bot_info
     })
 
 

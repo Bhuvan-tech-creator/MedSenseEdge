@@ -54,6 +54,7 @@ SKIN_KEYWORDS = ['rash', 'skin', 'red', 'itch']
 RESPIRATORY_KEYWORDS = ['cough', 'throat', 'respiratory']
 DIGESTIVE_KEYWORDS = ['stomach', 'nausea', 'digestive', 'abdomen']
 
+
 # Profile setup messages
 PROFILE_AGE_PROMPT = "Please enter a valid age between 1 and 120, or type 'skip':"
 PROFILE_GENDER_PROMPT = "👤 Thank you! Now please tell me your gender (Male/Female/Other) or type 'skip':"
