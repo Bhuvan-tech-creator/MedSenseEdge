@@ -1,19 +1,14 @@
 """Follow-up service for 24-hour symptom check-ins"""
-
 import time
 import threading
 from datetime import datetime, timedelta
 from models.user import get_pending_followups, mark_followup_sent, save_followup_response
 from services.message_service import send_whatsapp_message, send_telegram_message
-
-
 class FollowUpService:
     """Service to manage 24-hour follow-up check-ins"""
-    
     def __init__(self):
         self.running = False
-        self.check_interval = 300  # Check every 5 minutes for due follow-ups
-        
+        self.check_interval = 300
     def start_scheduler(self):
         """Start the follow-up scheduler in a background thread"""
         if not self.running:
@@ -21,12 +16,10 @@ class FollowUpService:
             scheduler_thread = threading.Thread(target=self._scheduler_loop, daemon=True)
             scheduler_thread.start()
             print("✅ Follow-up scheduler started")
-    
     def stop_scheduler(self):
         """Stop the follow-up scheduler"""
         self.running = False
         print("⏹️ Follow-up scheduler stopped")
-    
     def _scheduler_loop(self):
         """Main scheduler loop that runs in background"""
         while self.running:
@@ -35,35 +28,26 @@ class FollowUpService:
                 time.sleep(self.check_interval)
             except Exception as e:
                 print(f"Error in follow-up scheduler: {e}")
-                time.sleep(60)  # Wait a minute before retrying on error
-    
+                time.sleep(60)
     def _process_pending_followups(self):
         """Process all pending follow-up reminders"""
         try:
             pending_followups = get_pending_followups()
-            
             for followup in pending_followups:
                 followup_id, user_id, platform, symptoms, diagnosis_id, scheduled_time = followup
-                
-                # Create follow-up message
                 followup_message = self._create_followup_message(symptoms)
-                
-                # Send the message based on platform
                 success = False
                 if platform == "whatsapp":
                     success = send_whatsapp_message(user_id, followup_message)
                 elif platform == "telegram":
                     success = send_telegram_message(user_id, followup_message)
-                
                 if success:
                     mark_followup_sent(followup_id)
                     print(f"✅ Follow-up sent to {user_id} on {platform}")
                 else:
                     print(f"❌ Failed to send follow-up to {user_id} on {platform}")
-                    
         except Exception as e:
             print(f"Error processing follow-ups: {e}")
-    
     def _create_followup_message(self, original_symptoms):
         """Create a follow-up check-in message"""
         message = (
@@ -74,16 +58,11 @@ class FollowUpService:
             f"Please let me know how you're feeling now. If your symptoms have worsened or you have new concerns, I'm here to help! 💙"
         )
         return message
-    
     def handle_followup_response(self, user_id, response_text):
         """Handle user's response to a follow-up check-in"""
         try:
-            # Save the response
             save_followup_response(user_id, response_text)
-            
-            # Create a contextual response based on their answer
             response_lower = response_text.lower()
-            
             if any(word in response_lower for word in ['better', 'improved', 'good', 'fine', 'well']):
                 return (
                     "😊 **Great to hear you're feeling better!**\n\n"
@@ -110,18 +89,13 @@ class FollowUpService:
                     "I'm here to help if you'd like to describe your current symptoms in more detail or if you have any new health concerns.\n\n"
                     "📍 **Please share your location if you would like a list of clinics near you and an alert if your location has been flagged by WHO for an epidemic alert.**"
                 )
-                
         except Exception as e:
             print(f"Error handling follow-up response: {e}")
             return (
                 "Thank you for your response. I'm here to help if you have any health concerns.\n\n"
                 "📍 **Please share your location if you would like a list of clinics near you and an alert if your location has been flagged by WHO for an epidemic alert.**"
             )
-
-
-# Global instance
 followup_service = None
-
 def get_followup_service():
     """Get or create follow-up service instance"""
     global followup_service

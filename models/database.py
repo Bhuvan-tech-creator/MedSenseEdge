@@ -1,8 +1,5 @@
 """Database initialization and connection management"""
-
 import sqlite3
-
-
 def get_db_connection(db_path='medsense_history.db'):
     """Get database connection"""
     try:
@@ -11,15 +8,11 @@ def get_db_connection(db_path='medsense_history.db'):
     except Exception as e:
         print(f"Database connection error: {e}")
         return None
-
-
 def init_database():
     """Initialize database with all required tables"""
     try:
         conn = sqlite3.connect('medsense_history.db')
         cursor = conn.cursor()
-        
-        # Symptom history table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS symptom_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,8 +28,6 @@ def init_database():
                 location_address TEXT
             )
         ''')
-        
-        # Diagnosis feedback table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS diagnosis_feedback (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,8 +38,6 @@ def init_database():
                 FOREIGN KEY (history_id) REFERENCES symptom_history(id)
             )
         ''')
-        
-        # User profiles table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_profiles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,8 +48,6 @@ def init_database():
                 platform TEXT NOT NULL
             )
         ''')
-        
-        # User locations table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_locations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,8 +59,6 @@ def init_database():
                 platform TEXT NOT NULL
             )
         ''')
-        
-        # User countries table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_countries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,8 +68,6 @@ def init_database():
                 platform TEXT NOT NULL
             )
         ''')
-        
-        # Disease notifications table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS disease_notifications (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,8 +79,6 @@ def init_database():
                 timestamp DATETIME NOT NULL
             )
         ''')
-        
-        # Follow-up reminders table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS follow_up_reminders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,11 +94,9 @@ def init_database():
                 FOREIGN KEY (diagnosis_id) REFERENCES symptom_history(id)
             )
         ''')
-        
         conn.commit()
         conn.close()
         print("✅ Database initialized successfully")
-        
     except Exception as e:
         print(f"❌ Database initialization error: {e}")
         raise e 

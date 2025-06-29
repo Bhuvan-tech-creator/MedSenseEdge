@@ -1,18 +1,14 @@
 """Message service for WhatsApp and Telegram communication"""
-
 import requests
 import base64
 from flask import current_app
 from utils.helpers import truncate_text
-
-
 def send_whatsapp_message(recipient, message):
     """Send WhatsApp message"""
     try:
         whatsapp_token = current_app.config.get('WHATSAPP_TOKEN')
         phone_number_id = current_app.config.get('PHONE_NUMBER_ID')
         max_length = current_app.config.get('MAX_MESSAGE_LENGTH', 4096)
-        
         url = f"https://graph.facebook.com/v19.0/{phone_number_id}/messages"
         headers = {
             "Authorization": f"Bearer {whatsapp_token}",
@@ -30,14 +26,11 @@ def send_whatsapp_message(recipient, message):
     except Exception as e:
         print(f"Error sending WhatsApp message: {e}")
         return False
-
-
 def send_telegram_message(chat_id, text):
     """Send Telegram message"""
     try:
         telegram_token = current_app.config.get('TELEGRAM_BOT_TOKEN')
         max_length = current_app.config.get('MAX_MESSAGE_LENGTH', 4096)
-        
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
         payload = {
             "chat_id": chat_id, 
@@ -50,8 +43,6 @@ def send_telegram_message(chat_id, text):
     except Exception as e:
         print(f"Error sending Telegram message: {e}")
         return False
-
-
 def get_whatsapp_image_url(media_id):
     """Get WhatsApp image URL from media ID"""
     try:
@@ -66,8 +57,6 @@ def get_whatsapp_image_url(media_id):
     except Exception as e:
         print(f"Error in get_whatsapp_image_url: {e}")
         return None
-
-
 def download_and_encode_whatsapp_image(image_url):
     """Download and base64 encode WhatsApp image"""
     try:
@@ -84,8 +73,6 @@ def download_and_encode_whatsapp_image(image_url):
     except Exception as e:
         print(f"Error in download_and_encode_whatsapp_image: {e}")
         return None
-
-
 def get_telegram_file_path(file_id):
     """Get Telegram file path from file ID"""
     try:
@@ -103,8 +90,6 @@ def get_telegram_file_path(file_id):
     except Exception as e:
         print(f"Error in get_telegram_file_path: {e}")
         return None
-
-
 def download_telegram_image(file_url):
     """Download and base64 encode Telegram image"""
     try:
@@ -119,8 +104,6 @@ def download_telegram_image(file_url):
     except Exception as e:
         print(f"Error in download_telegram_image: {e}")
         return None
-
-
 def test_telegram_token():
     """Test if Telegram bot token is valid"""
     try:
@@ -136,8 +119,6 @@ def test_telegram_token():
     except Exception as e:
         print(f"Error testing Telegram token: {e}")
         return False
-
-
 def get_telegram_bot_info():
     """Get Telegram bot information including username"""
     try:
@@ -153,8 +134,6 @@ def get_telegram_bot_info():
     except Exception as e:
         print(f"Error getting bot info: {e}")
         return None
-
-
 def get_telegram_webhook_info():
     """Get current Telegram webhook information"""
     try:
@@ -167,18 +146,12 @@ def get_telegram_webhook_info():
     except Exception as e:
         print(f"Error getting webhook info: {e}")
         return None
-
-
 def set_telegram_webhook(webhook_url):
     """Set Telegram webhook URL"""
     try:
         telegram_token = current_app.config.get('TELEGRAM_BOT_TOKEN')
-        
-        # Delete existing webhook first
         delete_url = f"https://api.telegram.org/bot{telegram_token}/deleteWebhook"
         requests.post(delete_url, timeout=10)
-        
-        # Set new webhook
         set_url = f"https://api.telegram.org/bot{telegram_token}/setWebhook"
         payload = {
             "url": f"{webhook_url}/webhook/telegram",

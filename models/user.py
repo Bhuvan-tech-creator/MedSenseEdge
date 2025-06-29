@@ -1,10 +1,7 @@
 """User-related database operations"""
-
 import sqlite3
 from datetime import datetime, timedelta
 from models.database import get_db_connection
-
-
 def save_user_profile(user_id, age, gender, platform):
     """Save or update user profile"""
     try:
@@ -21,8 +18,6 @@ def save_user_profile(user_id, age, gender, platform):
     except Exception as e:
         print(f"Error saving user profile: {e}")
         return False
-
-
 def get_user_profile(user_id):
     """Get user profile information"""
     try:
@@ -39,15 +34,11 @@ def get_user_profile(user_id):
     except Exception as e:
         print(f"Error retrieving user profile: {e}")
         return None
-
-
 def is_new_user(user_id):
     """Check if user is new (no profile and no history)"""
     profile = get_user_profile(user_id)
     history = get_user_history(user_id)
     return profile is None and len(history) == 0
-
-
 def save_user_location(user_id, latitude, longitude, address, platform):
     """Save user location data"""
     try:
@@ -64,8 +55,6 @@ def save_user_location(user_id, latitude, longitude, address, platform):
     except Exception as e:
         print(f"Error saving user location: {e}")
         return False
-
-
 def get_user_recent_location(user_id, hours_back=24):
     """Get user's most recent location within specified timeframe"""
     try:
@@ -85,8 +74,6 @@ def get_user_recent_location(user_id, hours_back=24):
     except Exception as e:
         print(f"Error retrieving user location: {e}")
         return None
-
-
 def save_user_country(user_id, country, platform):
     """Save user's country for disease outbreak notifications"""
     try:
@@ -103,8 +90,6 @@ def save_user_country(user_id, country, platform):
     except Exception as e:
         print(f"Error saving user country: {e}")
         return False
-
-
 def get_user_country(user_id):
     """Get user's country for disease outbreak checking"""
     try:
@@ -117,33 +102,26 @@ def get_user_country(user_id):
     except Exception as e:
         print(f"Error retrieving user country: {e}")
         return None
-
-
 def save_diagnosis_to_history(user_id, platform, symptoms, diagnosis, body_part=None, severity=None, location_data=None):
     """Save diagnosis to user's medical history"""
     try:
         conn = sqlite3.connect('medsense_history.db')
         cursor = conn.cursor()
-        
         lat, lon, address = None, None, None
         if location_data:
             lat = location_data.get('lat')
             lon = location_data.get('lon')
             address = location_data.get('address')
-        
         cursor.execute('''
             INSERT INTO symptom_history (user_id, platform, symptoms, diagnosis, timestamp, body_part, severity, location_lat, location_lon, location_address)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (user_id, platform, symptoms, diagnosis, datetime.now(), body_part, severity, lat, lon, address))
         history_id = cursor.lastrowid
-        
-        # Schedule 24-hour follow-up reminder
         followup_time = datetime.now() + timedelta(hours=24)
         cursor.execute('''
             INSERT INTO follow_up_reminders (user_id, platform, symptoms, diagnosis_id, scheduled_time, timestamp)
             VALUES (?, ?, ?, ?, ?, ?)
         ''', (user_id, platform, symptoms, history_id, followup_time, datetime.now()))
-        
         conn.commit()
         conn.close()
         print(f"Saved diagnosis to history for user {user_id} with 24h follow-up scheduled")
@@ -151,8 +129,6 @@ def save_diagnosis_to_history(user_id, platform, symptoms, diagnosis, body_part=
     except Exception as e:
         print(f"Error saving to database: {e}")
         return None
-
-
 def get_user_history(user_id, days_back=365):
     """Get user's medical history"""
     try:
@@ -171,8 +147,6 @@ def get_user_history(user_id, days_back=365):
     except Exception as e:
         print(f"Error retrieving history: {e}")
         return []
-
-
 def get_history_id(user_id, timestamp):
     """Get history ID for a specific timestamp"""
     try:
@@ -188,8 +162,6 @@ def get_history_id(user_id, timestamp):
     except Exception as e:
         print(f"Error retrieving history_id: {e}")
         return None
-
-
 def save_feedback(user_id, history_id, feedback):
     """Save user feedback for a diagnosis"""
     try:
@@ -204,8 +176,6 @@ def save_feedback(user_id, history_id, feedback):
         print(f"Saved feedback for user {user_id}, history_id {history_id}")
     except Exception as e:
         print(f"Error saving feedback: {e}")
-
-
 def get_pending_followups():
     """Get all pending follow-up reminders that are due"""
     try:
@@ -224,8 +194,6 @@ def get_pending_followups():
     except Exception as e:
         print(f"Error retrieving pending follow-ups: {e}")
         return []
-
-
 def mark_followup_sent(followup_id):
     """Mark a follow-up reminder as sent"""
     try:
@@ -242,14 +210,11 @@ def mark_followup_sent(followup_id):
     except Exception as e:
         print(f"Error marking follow-up as sent: {e}")
         return False
-
-
 def save_followup_response(user_id, response_text):
     """Save user's response to a follow-up check-in"""
     try:
         conn = sqlite3.connect('medsense_history.db')
         cursor = conn.cursor()
-        # Find the most recent sent follow-up for this user that hasn't received a response
         cursor.execute('''
             UPDATE follow_up_reminders 
             SET response_received = TRUE, user_response = ?
@@ -263,8 +228,6 @@ def save_followup_response(user_id, response_text):
     except Exception as e:
         print(f"Error saving follow-up response: {e}")
         return False
-
-
 def is_followup_response_expected(user_id):
     """Check if a follow-up response is expected from this user"""
     try:
