@@ -6,6 +6,7 @@ from flask import current_app
 from utils.helpers import calculate_distance
 from models.user import get_user_country, save_user_country
 import re
+from datetime import datetime
 _endlessmedical_session = {"session_id": None, "initialized": False}
 def pubmed_search(query, max_results=5):
     """
@@ -262,78 +263,182 @@ def check_disease_outbreaks_for_user(user_id):
         print("❌ No outbreak data received from WHO API")
         return []
     relevant_outbreaks = []
+    current_year = datetime.now().year
+    cutoff_year = current_year - 2  # Only show outbreaks from last 2 years
+    
     try:
         if isinstance(outbreaks_data, list):
             outbreak_entries = outbreaks_data
         else:
             outbreak_entries = outbreaks_data.get('value', outbreaks_data.get('data', outbreaks_data.get('outbreaks', [])))
         print(f"📋 Processing {len(outbreak_entries)} outbreak entries")
+        
         for entry in outbreak_entries:
             try:
                 title = entry.get('Title', entry.get('title', 'Unknown outbreak'))
                 summary = entry.get('Summary', entry.get('summary', ''))
                 overview = entry.get('Overview', entry.get('overview', ''))
                 publication_date = entry.get('PublicationDate', entry.get('PublicationDateAndTime', entry.get('DateCreated', '')))
-                content_text = f"{title} {summary} {overview}".lower()
-                country_variations = [
-                    user_country.lower(),
-                    user_country.lower().replace(' ', ''),
-                    user_country.lower().replace('_', ' '),
-                ]
+                
+                # IMPROVED DATE FILTERING - Skip old outbreaks
+                is_recent = False
+                outbreak_year = None
+                if publication_date:
+                    try:
+                        if 'T' in publication_date:
+                            parsed_date = datetime.fromisoformat(publication_date.replace('Z', '+00:00'))
+                            outbreak_year = parsed_date.year
+                        elif '-' in publication_date:
+                            # Handle YYYY-MM-DD format
+                            year_part = publication_date.split('-')[0]
+                            if year_part.isdigit() and len(year_part) == 4:
+                                outbreak_year = int(year_part)
+                        elif publication_date.isdigit() and len(publication_date) == 4:
+                            # Handle YYYY format
+                            outbreak_year = int(publication_date)
+                        
+                        if outbreak_year and outbreak_year >= cutoff_year:
+                            is_recent = True
+                        else:
+                            print(f"⏰ Skipping old outbreak from {outbreak_year}: {title[:50]}...")
+                            continue
+                    except Exception as date_error:
+                        print(f"⚠️ Date parsing error for '{publication_date}': {date_error}")
+                        # If we can't parse the date, skip it to be safe
+                        continue
+                else:
+                    # No date available, skip it
+                    print(f"📅 Skipping outbreak with no date: {title[:50]}...")
+                    continue
+                
+                if not is_recent:
+                    continue
+                
+                # IMPROVED COUNTRY MATCHING - More precise matching
+                user_country_clean = user_country.lower().strip()
+                
+                # Expand country variations more carefully
+                country_variations = [user_country_clean]
+                
+                # Add specific country mappings
                 country_mapping = {
-                    'united states': ['usa', 'america', 'us'],
-                    'usa': ['united states', 'america'],
-                    'united kingdom': ['uk', 'britain', 'england'],
-                    'uk': ['united kingdom', 'britain', 'england'],
-                    'south africa': ['rsa'],
-                    'democratic republic of congo': ['drc', 'congo'],
-                    'drc': ['democratic republic of congo', 'congo'],
+                    'united states': ['usa', 'america', 'us', 'united states of america'],
+                    'usa': ['united states', 'america', 'us', 'united states of america'],
+                    'america': ['usa', 'united states', 'us', 'united states of america'],
+                    'united kingdom': ['uk', 'britain', 'england', 'great britain'],
+                    'uk': ['united kingdom', 'britain', 'england', 'great britain'],
+                    'britain': ['uk', 'united kingdom', 'england', 'great britain'],
+                    'south africa': ['rsa', 'republic of south africa'],
+                    'democratic republic of congo': ['drc', 'congo drc', 'dr congo'],
+                    'drc': ['democratic republic of congo', 'congo drc', 'dr congo'],
+                    'china': ['peoples republic of china', 'prc'],
+                    'russia': ['russian federation', 'ussr'],
+                    'south korea': ['republic of korea', 'korea south'],
+                    'north korea': ['democratic peoples republic of korea', 'korea north']
                 }
-                if user_country.lower() in country_mapping:
-                    country_variations.extend(country_mapping[user_country.lower()])
+                
+                if user_country_clean in country_mapping:
+                    country_variations.extend(country_mapping[user_country_clean])
+                
+                # Check title and content for country mentions
+                content_text = f"{title} {summary} {overview}".lower()
+                
+                # STRICTER COUNTRY MATCHING - Must appear in title or be prominent in content
                 is_relevant = False
+                country_found_in = []
+                
+                # Check if country appears in title (high relevance)
+                title_lower = title.lower()
                 for country_var in country_variations:
                     pattern = r'\b' + re.escape(country_var) + r'\b'
-                    if re.search(pattern, content_text, re.IGNORECASE):
+                    if re.search(pattern, title_lower, re.IGNORECASE):
                         is_relevant = True
+                        country_found_in.append(f"title: {country_var}")
                         break
+                
+                # If not in title, check for prominent mentions in content
                 if not is_relevant:
-                    regions_content = entry.get('regionscountries', '')
+                    for country_var in country_variations:
+                        pattern = r'\b' + re.escape(country_var) + r'\b'
+                        matches = re.findall(pattern, content_text, re.IGNORECASE)
+                        # Require multiple mentions or specific outbreak keywords
+                        if len(matches) >= 2 or (len(matches) >= 1 and any(keyword in content_text for keyword in ['outbreak in', 'epidemic in', 'cases in', 'reported in'])):
+                            is_relevant = True
+                            country_found_in.append(f"content: {country_var} ({len(matches)} mentions)")
+                            break
+                
+                # Also check regions/countries field if available
+                if not is_relevant:
+                    regions_content = entry.get('regionscountries', entry.get('RegionsCountries', ''))
                     if regions_content and isinstance(regions_content, str):
+                        regions_lower = regions_content.lower()
                         for country_var in country_variations:
                             pattern = r'\b' + re.escape(country_var) + r'\b'
-                            if re.search(pattern, regions_content, re.IGNORECASE):
+                            if re.search(pattern, regions_lower, re.IGNORECASE):
                                 is_relevant = True
+                                country_found_in.append(f"regions: {country_var}")
                                 break
+                
+                # ADDITIONAL VALIDATION - Ensure it's actually about the country, not just mentioning it
+                if is_relevant:
+                    # Skip if it's clearly about a different primary country
+                    other_countries = ['afghanistan', 'albania', 'algeria', 'argentina', 'australia', 'austria', 'bangladesh', 'belgium', 'brazil', 'canada', 'chile', 'colombia', 'denmark', 'egypt', 'ethiopia', 'finland', 'france', 'germany', 'ghana', 'greece', 'india', 'indonesia', 'iran', 'iraq', 'ireland', 'israel', 'italy', 'japan', 'kenya', 'malaysia', 'mexico', 'morocco', 'netherlands', 'nigeria', 'norway', 'pakistan', 'peru', 'philippines', 'poland', 'portugal', 'romania', 'saudi arabia', 'singapore', 'spain', 'sweden', 'switzerland', 'thailand', 'turkey', 'ukraine', 'venezuela', 'vietnam']
+                    
+                    # Remove user's country from the check list
+                    other_countries = [c for c in other_countries if c != user_country_clean and c not in country_variations]
+                    
+                    # Count mentions of other countries in title
+                    other_country_mentions_in_title = 0
+                    for other_country in other_countries:
+                        if re.search(r'\b' + re.escape(other_country) + r'\b', title_lower):
+                            other_country_mentions_in_title += 1
+                    
+                    # If title prominently features other countries, it's probably not about user's country
+                    if other_country_mentions_in_title >= 2:
+                        print(f"🚫 Skipping outbreak primarily about other countries: {title[:50]}...")
+                        continue
+                
                 if is_relevant:
                     disease_name = title
-                    if '-' in title:
+                    if ' – ' in title:  # WHO often uses this format: "Disease – Country"
+                        disease_name = title.split(' – ')[0].strip()
+                    elif '-' in title:
                         disease_name = title.split('-')[0].strip()
                     elif 'outbreak' in title.lower():
                         disease_name = title.replace('outbreak', '').replace('Outbreak', '').strip()
+                    
                     formatted_date = publication_date
                     if publication_date:
                         try:
-                            from datetime import datetime
                             if 'T' in publication_date:
                                 parsed_date = datetime.fromisoformat(publication_date.replace('Z', '+00:00'))
                                 formatted_date = parsed_date.strftime('%Y-%m-%d')
                         except:
                             pass
+                    
                     outbreak_info = {
                         'disease': disease_name,
                         'title': title,
                         'location': user_country,
                         'date': formatted_date,
+                        'year': outbreak_year,
                         'summary': (summary or overview)[:300] + '...' if len(summary or overview) > 300 else (summary or overview),
-                        'source': 'WHO Disease Outbreak News'
+                        'source': 'WHO Disease Outbreak News',
+                        'relevance_details': ', '.join(country_found_in)
                     }
                     relevant_outbreaks.append(outbreak_info)
-                    print(f"✅ Found relevant outbreak: {disease_name} for {user_country}")
+                    print(f"✅ Found relevant outbreak: {disease_name} for {user_country} ({outbreak_year}) - Found in: {', '.join(country_found_in)}")
             except Exception as e:
                 print(f"⚠️ Error processing outbreak entry: {e}")
                 continue
-        print(f"🎯 Found {len(relevant_outbreaks)} relevant outbreaks for {user_country}")
+        
+        # Sort by year (most recent first)
+        relevant_outbreaks.sort(key=lambda x: x.get('year', 0), reverse=True)
+        
+        # Limit to most recent 5 outbreaks to avoid overwhelming users
+        relevant_outbreaks = relevant_outbreaks[:5]
+        
+        print(f"🎯 Found {len(relevant_outbreaks)} recent and relevant outbreaks for {user_country}")
         return relevant_outbreaks
     except Exception as e:
         print(f"💥 Error processing WHO outbreak data: {e}")

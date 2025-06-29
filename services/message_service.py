@@ -1,11 +1,51 @@
 """Message service for WhatsApp and Telegram communication"""
 import requests
 import base64
+import threading
+import hashlib
+from datetime import datetime, timedelta
 from flask import current_app
 from utils.helpers import truncate_text
+
+# Message sending deduplication
+_sent_messages = {}
+_send_lock = threading.Lock()
+
+def _clean_sent_messages():
+    """Clean sent messages older than 2 minutes"""
+    cutoff = datetime.now() - timedelta(minutes=2)
+    with _send_lock:
+        to_remove = [msg_hash for msg_hash, timestamp in _sent_messages.items() if timestamp < cutoff]
+        for msg_hash in to_remove:
+            del _sent_messages[msg_hash]
+
+def _generate_message_hash(recipient, message):
+    """Generate hash for message deduplication"""
+    message_str = f"{recipient}_{message}"
+    return hashlib.md5(message_str.encode()).hexdigest()
+
+def _is_duplicate_send(recipient, message):
+    """Check if this exact message was recently sent to this recipient"""
+    message_hash = _generate_message_hash(recipient, message)
+    
+    with _send_lock:
+        _clean_sent_messages()
+        
+        if message_hash in _sent_messages:
+            print(f"🚫 DUPLICATE SEND: Message {message_hash[:8]} already sent to {recipient}")
+            return True
+        
+        # Mark as sent
+        _sent_messages[message_hash] = datetime.now()
+        return False
+
 def send_whatsapp_message(recipient, message):
-    """Send WhatsApp message"""
+    """Send WhatsApp message with duplicate prevention"""
     try:
+        # Check for duplicate message send
+        if _is_duplicate_send(recipient, message):
+            return True  # Return success since message was already sent
+        
         whatsapp_token = current_app.config.get('WHATSAPP_TOKEN')
         phone_number_id = current_app.config.get('PHONE_NUMBER_ID')
         max_length = current_app.config.get('MAX_MESSAGE_LENGTH', 4096)
@@ -26,9 +66,14 @@ def send_whatsapp_message(recipient, message):
     except Exception as e:
         print(f"Error sending WhatsApp message: {e}")
         return False
+
 def send_telegram_message(chat_id, text):
-    """Send Telegram message"""
+    """Send Telegram message with duplicate prevention"""
     try:
+        # Check for duplicate message send
+        if _is_duplicate_send(chat_id, text):
+            return True  # Return success since message was already sent
+        
         telegram_token = current_app.config.get('TELEGRAM_BOT_TOKEN')
         max_length = current_app.config.get('MAX_MESSAGE_LENGTH', 4096)
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
@@ -43,6 +88,7 @@ def send_telegram_message(chat_id, text):
     except Exception as e:
         print(f"Error sending Telegram message: {e}")
         return False
+
 def get_whatsapp_image_url(media_id):
     """Get WhatsApp image URL from media ID"""
     try:
@@ -57,6 +103,7 @@ def get_whatsapp_image_url(media_id):
     except Exception as e:
         print(f"Error in get_whatsapp_image_url: {e}")
         return None
+
 def download_and_encode_whatsapp_image(image_url):
     """Download and base64 encode WhatsApp image"""
     try:
@@ -73,6 +120,7 @@ def download_and_encode_whatsapp_image(image_url):
     except Exception as e:
         print(f"Error in download_and_encode_whatsapp_image: {e}")
         return None
+
 def get_telegram_file_path(file_id):
     """Get Telegram file path from file ID"""
     try:
@@ -90,6 +138,7 @@ def get_telegram_file_path(file_id):
     except Exception as e:
         print(f"Error in get_telegram_file_path: {e}")
         return None
+
 def download_telegram_image(file_url):
     """Download and base64 encode Telegram image"""
     try:
@@ -104,6 +153,7 @@ def download_telegram_image(file_url):
     except Exception as e:
         print(f"Error in download_telegram_image: {e}")
         return None
+
 def test_telegram_token():
     """Test if Telegram bot token is valid"""
     try:
@@ -119,6 +169,7 @@ def test_telegram_token():
     except Exception as e:
         print(f"Error testing Telegram token: {e}")
         return False
+
 def get_telegram_bot_info():
     """Get Telegram bot information including username"""
     try:
@@ -134,6 +185,7 @@ def get_telegram_bot_info():
     except Exception as e:
         print(f"Error getting bot info: {e}")
         return None
+
 def get_telegram_webhook_info():
     """Get current Telegram webhook information"""
     try:
@@ -146,6 +198,7 @@ def get_telegram_webhook_info():
     except Exception as e:
         print(f"Error getting webhook info: {e}")
         return None
+
 def set_telegram_webhook(webhook_url):
     """Set Telegram webhook URL"""
     try:

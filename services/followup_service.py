@@ -4,11 +4,34 @@ import threading
 from datetime import datetime, timedelta
 from models.user import get_pending_followups, mark_followup_sent, save_followup_response
 from services.message_service import send_whatsapp_message, send_telegram_message
+
 class FollowUpService:
     """Service to manage 24-hour follow-up check-ins"""
     def __init__(self):
         self.running = False
         self.check_interval = 300
+        self.recently_sent = {}  # Track recently sent followups to prevent duplicates
+        self._lock = threading.Lock()  # Thread safety
+
+    def _clean_recent_sent(self):
+        """Clean recently sent tracking older than 1 hour"""
+        cutoff = datetime.now() - timedelta(hours=1)
+        with self._lock:
+            to_remove = [key for key, timestamp in self.recently_sent.items() if timestamp < cutoff]
+            for key in to_remove:
+                del self.recently_sent[key]
+
+    def _is_recently_sent(self, followup_id):
+        """Check if followup was recently sent"""
+        with self._lock:
+            self._clean_recent_sent()
+            return followup_id in self.recently_sent
+
+    def _mark_recently_sent(self, followup_id):
+        """Mark followup as recently sent"""
+        with self._lock:
+            self.recently_sent[followup_id] = datetime.now()
+
     def start_scheduler(self):
         """Start the follow-up scheduler in a background thread"""
         if not self.running:
@@ -35,6 +58,8 @@ class FollowUpService:
             pending_followups = get_pending_followups()
             for followup in pending_followups:
                 followup_id, user_id, platform, symptoms, diagnosis_id, scheduled_time = followup
+                if self._is_recently_sent(followup_id):
+                    continue  # Skip if already sent recently
                 followup_message = self._create_followup_message(symptoms)
                 success = False
                 if platform == "whatsapp":
@@ -43,6 +68,7 @@ class FollowUpService:
                     success = send_telegram_message(user_id, followup_message)
                 if success:
                     mark_followup_sent(followup_id)
+                    self._mark_recently_sent(followup_id)
                     print(f"✅ Follow-up sent to {user_id} on {platform}")
                 else:
                     print(f"❌ Failed to send follow-up to {user_id} on {platform}")
@@ -95,6 +121,7 @@ class FollowUpService:
                 "Thank you for your response. I'm here to help if you have any health concerns.\n\n"
                 "📍 **Please share your location if you would like a list of clinics near you and an alert if your location has been flagged by WHO for an epidemic alert.**"
             )
+
 followup_service = None
 def get_followup_service():
     """Get or create follow-up service instance"""

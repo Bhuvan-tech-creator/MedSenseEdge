@@ -1,4 +1,10 @@
 """Constants and messages used throughout the application"""
+
+# Immediate response messages to prevent user confusion during processing
+PROCESSING_TEXT_MSG = "🔄 Processing your request. Doing research using PubMed and medical databases. Please wait a few seconds or minutes depending on complexity."
+PROCESSING_IMAGE_MSG = "🖼️ Processing your medical image. Analyzing with AI and searching medical literature. Please wait a few seconds or minutes."
+PROCESSING_LOCATION_MSG = "📍 Processing your location. Finding nearby medical facilities and checking WHO disease outbreak alerts. Please wait a few seconds."
+
 WELCOME_MSG = (
     "\U0001F44B Welcome to MedSense AI.\n"
     "Type your symptoms (e.g., 'I have fever and chills') or send an image from your camera or gallery.\n"

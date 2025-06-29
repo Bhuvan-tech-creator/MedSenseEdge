@@ -1,9 +1,11 @@
 """Session service for managing user sessions and profile setup"""
+import threading
 from datetime import datetime, timedelta
 from models.user import save_user_profile, is_new_user
 from services.message_service import send_whatsapp_message, send_telegram_message
 from utils.constants import *
 from utils.helpers import is_inactive_session, detect_platform
+
 class SessionService:
     """
     Enhanced session service for LangGraph medical agent system
@@ -13,11 +15,13 @@ class SessionService:
     - Multi-platform support (WhatsApp/Telegram)
     - Activity tracking and cleanup
     - Agent state persistence
+    - Thread-safe duplicate prevention
     """
     def __init__(self):
-        """Initialize session storage"""
+        """Initialize session storage with thread safety"""
         self.user_sessions = {}
         self.profile_setup_sessions = {}
+        self._lock = threading.Lock()  # Thread safety for profile setup
     def get_session(self, user_id):
         """Get or create user session"""
         if user_id not in self.user_sessions:
@@ -59,62 +63,79 @@ class SessionService:
             self.clear_session(user_id)
             print(f"Cleared session for inactive user {user_id}")
     def should_start_profile_setup(self, user_id):
-        """Check if profile setup should be started for new user"""
-        return is_new_user(user_id) and not self.is_in_profile_setup(user_id)
+        """Check if profile setup should be started for new user (thread-safe)"""
+        with self._lock:
+            return is_new_user(user_id) and not self.is_in_profile_setup(user_id)
     def start_profile_setup(self, user_id, platform):
-        """Start the profile setup process for new users"""
-        # Check if profile setup was already started recently (within 30 seconds)
-        if user_id in self.profile_setup_sessions:
-            started_at = self.profile_setup_sessions[user_id].get("started_at")
-            if started_at and (datetime.now() - started_at).total_seconds() < 30:
-                print(f"⚠️ Profile setup already initiated for {user_id} within last 30 seconds - skipping duplicate")
-                return  # Don't send another message
+        """Start the profile setup process for new users (thread-safe)"""
+        with self._lock:
+            # Double-check to prevent race conditions
+            if user_id in self.profile_setup_sessions:
+                started_at = self.profile_setup_sessions[user_id].get("started_at")
+                if started_at and (datetime.now() - started_at).total_seconds() < 60:  # Increased to 60 seconds
+                    print(f"⚠️ Profile setup already initiated for {user_id} within last 60 seconds - skipping duplicate")
+                    return  # Don't send another message
+            
+            # Set state IMMEDIATELY to prevent duplicate calls
+            self.profile_setup_sessions[user_id] = {
+                "step": "age",
+                "platform": platform,
+                "started_at": datetime.now(),
+                "temp_data": {},
+                "message_sent": True  # Flag to track if message was sent
+            }
         
-        # Set state IMMEDIATELY to prevent duplicate calls
-        self.profile_setup_sessions[user_id] = {
-            "step": "age",
-            "platform": platform,
-            "started_at": datetime.now(),
-            "temp_data": {}
-        }
-        # Then send the message
+        # Send message outside the lock to avoid blocking
         print(f"📧 Sending profile setup message to {user_id} on {platform}")
-        if platform == "whatsapp":
-            send_whatsapp_message(user_id, AGE_REQUEST_MSG)
-        else:
-            send_telegram_message(user_id, AGE_REQUEST_MSG)
+        try:
+            if platform == "whatsapp":
+                send_whatsapp_message(user_id, AGE_REQUEST_MSG)
+            else:
+                send_telegram_message(user_id, AGE_REQUEST_MSG)
+        except Exception as e:
+            print(f"❌ Error sending profile setup message to {user_id}: {e}")
+            # Remove from sessions if message failed to send
+            with self._lock:
+                if user_id in self.profile_setup_sessions:
+                    del self.profile_setup_sessions[user_id]
     def is_in_profile_setup(self, user_id):
-        """Check if user is currently in profile setup flow"""
-        return user_id in self.profile_setup_sessions
+        """Check if user is currently in profile setup flow (thread-safe)"""
+        with self._lock:
+            return user_id in self.profile_setup_sessions
     def get_profile_setup_step(self, user_id):
-        """Get current profile setup step"""
-        if user_id in self.profile_setup_sessions:
-            return self.profile_setup_sessions[user_id]["step"]
-        return None
+        """Get current profile setup step (thread-safe)"""
+        with self._lock:
+            if user_id in self.profile_setup_sessions:
+                return self.profile_setup_sessions[user_id]["step"]
+            return None
     def set_profile_setup_step(self, user_id, step):
-        """Set profile setup step"""
-        if user_id in self.profile_setup_sessions:
-            self.profile_setup_sessions[user_id]["step"] = step
+        """Set profile setup step (thread-safe)"""
+        with self._lock:
+            if user_id in self.profile_setup_sessions:
+                self.profile_setup_sessions[user_id]["step"] = step
     def save_age(self, user_id, age):
-        """Save user age during profile setup"""
-        if user_id in self.profile_setup_sessions:
-            self.profile_setup_sessions[user_id]["temp_data"]["age"] = age
+        """Save user age during profile setup (thread-safe)"""
+        with self._lock:
+            if user_id in self.profile_setup_sessions:
+                self.profile_setup_sessions[user_id]["temp_data"]["age"] = age
     def save_gender(self, user_id, gender):
-        """Save user gender during profile setup"""
-        if user_id in self.profile_setup_sessions:
-            self.profile_setup_sessions[user_id]["temp_data"]["gender"] = gender
+        """Save user gender during profile setup (thread-safe)"""
+        with self._lock:
+            if user_id in self.profile_setup_sessions:
+                self.profile_setup_sessions[user_id]["temp_data"]["gender"] = gender
     def complete_profile_setup(self, user_id):
-        """Complete profile setup and save to database"""
-        if user_id not in self.profile_setup_sessions:
-            return False
-        setup_data = self.profile_setup_sessions[user_id]
-        temp_data = setup_data["temp_data"]
-        platform = setup_data["platform"]
-        age = temp_data.get("age")
-        gender = temp_data.get("gender")
-        save_user_profile(user_id, age, gender, platform)
-        del self.profile_setup_sessions[user_id]
-        return True
+        """Complete profile setup and save to database (thread-safe)"""
+        with self._lock:
+            if user_id not in self.profile_setup_sessions:
+                return False
+            setup_data = self.profile_setup_sessions[user_id]
+            temp_data = setup_data["temp_data"]
+            platform = setup_data["platform"]
+            age = temp_data.get("age")
+            gender = temp_data.get("gender")
+            save_user_profile(user_id, age, gender, platform)
+            del self.profile_setup_sessions[user_id]
+            return True
     def start_profile_setup_legacy(self, user_id, platform):
         """Start the profile setup process for new users (legacy)"""
         session = self.get_session(user_id)
