@@ -64,7 +64,7 @@ class MedicalAgentSystem:
             raise ValueError("GEMINI_API_KEY not found in configuration")
             
         return ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-flash",
             google_api_key=SecretStr(api_key),
             temperature=0.3,
             convert_system_message_to_human=False
