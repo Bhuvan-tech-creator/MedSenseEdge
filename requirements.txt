@@ -3,3 +3,9 @@ requests
 python-dotenv
 langchain-google-genai
 gunicorn
+langchain-core>=0.3.20
+langchain-community>=0.3.20
+langgraph>=0.2.40
+tavily-python>=0.5.0
+duckduckgo-search>=6.0.0
+beautifulsoup4>=4.12.0

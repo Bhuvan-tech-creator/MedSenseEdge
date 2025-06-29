@@ -5,6 +5,29 @@ import time
 from flask import current_app
 from utils.helpers import calculate_distance
 from models.user import get_user_country
+from duckduckgo_search import DDGS
+
+
+def duckduckgo_search(query, max_results=5):
+    """Search DuckDuckGo for medical information"""
+    try:
+        with DDGS() as ddgs:
+            results = []
+            search_results = ddgs.text(query, max_results=max_results)
+            
+            for result in search_results:
+                results.append({
+                    'title': result.get('title', ''),
+                    'body': result.get('body', ''),
+                    'href': result.get('href', ''),
+                    'source': 'DuckDuckGo'
+                })
+            
+            return results
+            
+    except Exception as e:
+        print(f"Error in DuckDuckGo search: {e}")
+        return [{"error": f"Search failed: {str(e)}"}]
 
 
 def reverse_geocode(latitude, longitude):
