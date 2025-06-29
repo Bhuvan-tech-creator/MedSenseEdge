@@ -133,12 +133,8 @@ def telegram_webhook():
         if "text" in msg:
             text = msg["text"]
             if text.startswith("/start"):
-                if session_service.should_start_profile_setup(chat_id):
-                    session_service.start_profile_setup(chat_id, "telegram")
-                else:
-                    send_telegram_message(chat_id, WELCOME_MSG)
-                return "OK", 200
-            if text.startswith("/"):
+                text = "start"
+            elif text.startswith("/"):
                 text = text[1:]
             response = message_processor.handle_text_message(chat_id, text, "telegram")
             if response:

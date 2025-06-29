@@ -25,7 +25,7 @@ class MessageProcessor:
                 return followup_service.handle_followup_response(sender, text)
             if self.session_service.should_start_profile_setup(sender):
                 self.session_service.start_profile_setup(sender, platform)
-                return PROFILE_SETUP_MSG
+                return None  # Don't return message since start_profile_setup already sends one
             if self.session_service.is_in_profile_setup(sender):
                 return self._handle_profile_setup(sender, text, platform)
             agent_system = self._get_agent_system()
@@ -55,7 +55,7 @@ class MessageProcessor:
         try:
             if self.session_service.should_start_profile_setup(sender):
                 self.session_service.start_profile_setup(sender, platform)
-                return PROFILE_SETUP_MSG
+                return None  # Don't return message since start_profile_setup already sends one
             if self.session_service.is_in_profile_setup(sender):
                 return "Please complete your profile setup first before sending images."
             agent_system = self._get_agent_system()
@@ -89,7 +89,7 @@ class MessageProcessor:
         try:
             if self.session_service.should_start_profile_setup(sender):
                 self.session_service.start_profile_setup(sender, platform)
-                return PROFILE_SETUP_MSG
+                return None  # Don't return message since start_profile_setup already sends one
             if self.session_service.is_in_profile_setup(sender):
                 return "Please complete your profile setup first before sharing location."
             location_name = reverse_geocode(latitude, longitude)

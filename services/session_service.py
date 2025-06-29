@@ -63,12 +63,14 @@ class SessionService:
         return is_new_user(user_id) and not self.is_in_profile_setup(user_id)
     def start_profile_setup(self, user_id, platform):
         """Start the profile setup process for new users"""
+        # Set state IMMEDIATELY to prevent duplicate calls
         self.profile_setup_sessions[user_id] = {
             "step": "age",
             "platform": platform,
             "started_at": datetime.now(),
             "temp_data": {}
         }
+        # Then send the message
         if platform == "whatsapp":
             send_whatsapp_message(user_id, AGE_REQUEST_MSG)
         else:

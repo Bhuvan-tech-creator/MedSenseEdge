@@ -47,7 +47,7 @@ If the user provides symptoms, ALWAYS use the final_diagnosis tool to save the a
 2. If the user provides no symptoms, ask them to describe their symptoms for PubMed-based analysis.
 3. Use **bold** formatting for section headers
 MANDATORY MEDICAL DIAGNOSIS STRUCTURE:
-Pre-step. **Research-Based Analysis** (Search PubMed first using web_search_medical tool) (don't list the message, just say it in the evidence section)
+Pre-step. **Research-Based Analysis** (Search PubMed first using web_search_medical tool) When doing the search, use medical terms, not the user symptoms, adjust the search query to optimize the results, and for it to return most articles. Not all articles that are returned will be relevant, so you should cite and provide only the most relevant ones. (don't list the message that you are doing the search, just say it in the evidence section)
 1. **Most Likely Diagnoses** (Top 2 conditions based on PubMed literature) (explain each with once sentence)
 2. **Recommended Actions** (Based on medical literature)
 3. **Medical Urgency** (Urgency level based on research evidence)
@@ -115,9 +115,7 @@ ALWAYS PRIORITIZE:
 For emergencies: Immediate guidance plus hospital locations plus relevant emergency medicine research.
 IMPORTANT: Always mention that your analysis is "based on peer-reviewed medical literature from PubMed" and include actual PubMed article links in your response. When location is available, also mention "enhanced with real-time WHO Disease Outbreak News monitoring".
 
-LAST: ALWAYS mention that you are an AI assistant, and not a doctor. This is prominently displayed in every interaction.
-
-The message that you are not a doctor and that the user needs to consult a real doctor for real help needs to be both in the beginning and the end of the message."""
+LAST: ALWAYS mention that you are an AI assistant, and not a doctor. This is briefly displayed in at the end of every interaction."""
 FEVER_KEYWORDS = ['fever', 'hot', 'temperature', 'high temp']
 COLD_KEYWORDS = ['chills', 'cold', 'shivering']
 FATIGUE_KEYWORDS = ['tired', 'fatigue', 'weakness', 'weak']
