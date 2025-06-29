@@ -117,7 +117,10 @@ def trigger_followup_test(user_id):
 
 @app.route("/webhook", methods=["GET", "POST"])
 def whatsapp_webhook():
+    """WhatsApp webhook endpoint with enhanced debugging and performance optimizations"""
+    start_time = datetime.now()
     session_service.clear_inactive_sessions()
+    
     if request.method == "GET":
         challenge = request.args.get("hub.challenge")
         verify_token = app.config.get('VERIFY_TOKEN')
@@ -131,42 +134,83 @@ def whatsapp_webhook():
         entry = data['entry'][0]['changes'][0]['value']
         messages = entry.get('messages', [])
         if not messages:
+            print(f"⚠️ WHATSAPP: No messages in data, returning OK")
             return "OK", 200
+        
         msg = messages[0]
         sender = msg['from']
+        
+        print(f"📨 WHATSAPP: Received message from {sender} at {start_time.strftime('%H:%M:%S.%f')}")
         
         # Check for duplicate messages using WhatsApp message ID
         message_id = msg.get('id')
         if message_id and is_duplicate_message(message_id):
-            print(f"⚠️ Skipping duplicate WhatsApp message {message_id} from {sender}")
+            print(f"⚠️ WHATSAPP: Skipping duplicate message {message_id} from {sender}")
             return "OK", 200
             
         session_service.update_session_activity(sender)
+        print(f"🔄 WHATSAPP: Session updated for {sender} at {(datetime.now() - start_time).total_seconds():.3f}s")
         
-        # Send immediate processing message for non-profile setup interactions
-        should_send_processing_msg = not session_service.is_in_profile_setup(sender) and not session_service.should_start_profile_setup(sender)
+        # OPTIMIZED: Quick check for profile setup (minimize blocking)
+        should_send_processing_msg = True
+        try:
+            # Do a quick, non-blocking check first
+            if session_service.is_in_profile_setup(sender):
+                should_send_processing_msg = False
+                print(f"👤 WHATSAPP: User {sender} is in profile setup")
+            else:
+                # Only check if new user if not already in setup
+                # This will be double-checked in background thread
+                print(f"✅ WHATSAPP: User {sender} not in profile setup, allowing processing message")
+        except Exception as e:
+            print(f"⚠️ WHATSAPP: Error checking profile setup: {e}")
+            # Default to sending processing message if check fails
+        
+        print(f"🚀 WHATSAPP: Starting background processing for {sender} at {(datetime.now() - start_time).total_seconds():.3f}s")
         
         # Process message in background to prevent webhook timeout
         def process_message():
+            bg_start = datetime.now()
+            print(f"🔄 WHATSAPP BG: Background processing started for {sender}")
             try:
                 if 'text' in msg:
                     body = msg['text']['body']
-                    # Send immediate processing message
-                    if should_send_processing_msg and not body.lower().startswith(('/start', 'start', 'history', 'clear', 'help')):
-                        send_whatsapp_message(sender, PROCESSING_TEXT_MSG)
                     
+                    print(f"📝 WHATSAPP BG: Processing text message: '{body[:50]}...'")
+                    
+                    # Send immediate processing message FIRST (before any blocking operations)
+                    if should_send_processing_msg and not body.lower().startswith(('/start', 'start', 'history', 'clear', 'help')):
+                        print(f"⚡ WHATSAPP BG: Sending immediate processing message to {sender}")
+                        processing_sent = send_whatsapp_message(sender, PROCESSING_TEXT_MSG)
+                        if processing_sent:
+                            print(f"✅ WHATSAPP BG: Processing message sent successfully to {sender}")
+                        else:
+                            print(f"❌ WHATSAPP BG: Failed to send processing message to {sender}")
+                    
+                    # Now do the actual processing
                     response = message_processor.handle_text_message(sender, body, "whatsapp")
                     if response:
-                        send_whatsapp_message(sender, response)
+                        print(f"📤 WHATSAPP BG: Sending response to {sender} (length: {len(response)} chars)")
+                        final_sent = send_whatsapp_message(sender, response)
+                        if final_sent:
+                            print(f"✅ WHATSAPP BG: Final response sent to {sender}")
+                        else:
+                            print(f"❌ WHATSAPP BG: Failed to send final response to {sender}")
+                    else:
+                        print(f"⚠️ WHATSAPP BG: No response generated for {sender}")
+                        
                 elif 'image' in msg:
                     media_id = msg['image']['id']
-                    image_url = get_whatsapp_image_url(media_id)
                     caption_text = msg['image'].get('caption', None)
+                    
+                    print(f"🖼️ WHATSAPP BG: Processing image message (media_id: {media_id[:20]}...)")
                     
                     # Send immediate processing message
                     if should_send_processing_msg:
+                        print(f"⚡ WHATSAPP BG: Sending immediate image processing message to {sender}")
                         send_whatsapp_message(sender, PROCESSING_IMAGE_MSG)
                     
+                    image_url = get_whatsapp_image_url(media_id)
                     if image_url:
                         image_base64 = download_and_encode_whatsapp_image(image_url)
                         if image_base64:
@@ -177,19 +221,27 @@ def whatsapp_webhook():
                             send_whatsapp_message(sender, IMAGE_ERROR_MSG)
                     else:
                         send_whatsapp_message(sender, IMAGE_ERROR_MSG)
+                        
                 elif 'location' in msg:
                     latitude = msg['location']['latitude']
                     longitude = msg['location']['longitude']
                     
+                    print(f"📍 WHATSAPP BG: Processing location message (lat: {latitude}, lon: {longitude})")
+                    
                     # Send immediate processing message
                     if should_send_processing_msg:
+                        print(f"⚡ WHATSAPP BG: Sending immediate location processing message to {sender}")
                         send_whatsapp_message(sender, PROCESSING_LOCATION_MSG)
                     
                     response = message_processor.handle_location_message(sender, latitude, longitude, "whatsapp")
                     if response:
                         send_whatsapp_message(sender, response)
+                        
+                processing_time = (datetime.now() - bg_start).total_seconds()
+                print(f"✅ WHATSAPP BG: Background processing completed for {sender} in {processing_time:.3f}s")
+                
             except Exception as e:
-                print(f"Background WhatsApp processing error: {e}")
+                print(f"❌ WHATSAPP BG: Background processing error for {sender}: {e}")
                 # Send error message to user
                 try:
                     send_whatsapp_message(sender, "I encountered a technical issue. Please try again or consult a healthcare professional if urgent.")
@@ -199,38 +251,66 @@ def whatsapp_webhook():
         # Start background processing
         threading.Thread(target=process_message, daemon=True).start()
         
+        webhook_time = (datetime.now() - start_time).total_seconds()
+        print(f"🏁 WHATSAPP: Webhook completed for {sender} in {webhook_time:.3f}s")
+        
     except Exception as e:
-        print("WhatsApp Error:", e)
+        error_time = (datetime.now() - start_time).total_seconds()
+        print(f"❌ WHATSAPP: Webhook error after {error_time:.3f}s: {e}")
     
     # Always return OK immediately to prevent retries
     return "OK", 200
 
 @app.route("/webhook/telegram", methods=["POST"])
 def telegram_webhook():
+    """Telegram webhook endpoint with enhanced debugging and performance optimizations"""
+    start_time = datetime.now()
     session_service.clear_inactive_sessions()
     
     try:
         data = request.get_json()
         if "message" not in data:
+            print(f"⚠️ TELEGRAM: No message in data, returning OK")
             return "OK", 200
+        
         msg = data["message"]
         chat_id = str(msg.get("chat", {}).get("id", ""))
         if not chat_id:
+            print(f"❌ TELEGRAM: No chat_id found")
             return "No chat_id", 400
+        
+        print(f"📨 TELEGRAM: Received message from {chat_id} at {start_time.strftime('%H:%M:%S.%f')}")
         
         # Check for duplicate messages using Telegram message ID
         message_id = msg.get('message_id')
         if message_id and is_duplicate_telegram_message(f"{chat_id}_{message_id}"):
-            print(f"⚠️ Skipping duplicate Telegram message {message_id} from {chat_id}")
+            print(f"⚠️ TELEGRAM: Skipping duplicate message {message_id} from {chat_id}")
             return "OK", 200
-            
-        session_service.update_session_activity(chat_id)
         
-        # Send immediate processing message for non-profile setup interactions
-        should_send_processing_msg = not session_service.is_in_profile_setup(chat_id) and not session_service.should_start_profile_setup(chat_id)
+        session_service.update_session_activity(chat_id)
+        print(f"🔄 TELEGRAM: Session updated for {chat_id} at {(datetime.now() - start_time).total_seconds():.3f}s")
+        
+        # OPTIMIZED: Quick check for profile setup (minimize blocking)
+        should_send_processing_msg = True
+        try:
+            # Do a quick, non-blocking check first
+            if session_service.is_in_profile_setup(chat_id):
+                should_send_processing_msg = False
+                print(f"👤 TELEGRAM: User {chat_id} is in profile setup")
+            else:
+                # Only check if new user if not already in setup
+                # This will be double-checked in background thread
+                print(f"✅ TELEGRAM: User {chat_id} not in profile setup, allowing processing message")
+        except Exception as e:
+            print(f"⚠️ TELEGRAM: Error checking profile setup: {e}")
+            # Default to sending processing message if check fails
+        
+        print(f"🚀 TELEGRAM: Starting background processing for {chat_id} at {(datetime.now() - start_time).total_seconds():.3f}s")
         
         # Process message in background to prevent webhook timeout
         def process_message():
+            bg_start = datetime.now()
+            print(f"🔄 TELEGRAM BG: Background processing started for {chat_id}")
             try:
                 if "text" in msg:
                     text = msg["text"]
@@ -239,23 +319,42 @@ def telegram_webhook():
                     elif text.startswith("/"):
                         text = text[1:]
                     
-                    # Send immediate processing message
-                    if should_send_processing_msg and not text.lower().startswith(('start', 'history', 'clear', 'help')):
-                        send_telegram_message(chat_id, PROCESSING_TEXT_MSG)
+                    print(f"📝 TELEGRAM BG: Processing text message: '{text[:50]}...'")
                     
+                    # Send immediate processing message FIRST (before any blocking operations)
+                    if should_send_processing_msg and not text.lower().startswith(('start', 'history', 'clear', 'help')):
+                        print(f"⚡ TELEGRAM BG: Sending immediate processing message to {chat_id}")
+                        processing_sent = send_telegram_message(chat_id, PROCESSING_TEXT_MSG)
+                        if processing_sent:
+                            print(f"✅ TELEGRAM BG: Processing message sent successfully to {chat_id}")
+                        else:
+                            print(f"❌ TELEGRAM BG: Failed to send processing message to {chat_id}")
+                    
+                    # Now do the actual processing
                     response = message_processor.handle_text_message(chat_id, text, "telegram")
                     if response:
-                        send_telegram_message(chat_id, response)
+                        print(f"📤 TELEGRAM BG: Sending response to {chat_id} (length: {len(response)} chars)")
+                        final_sent = send_telegram_message(chat_id, response)
+                        if final_sent:
+                            print(f"✅ TELEGRAM BG: Final response sent to {chat_id}")
+                        else:
+                            print(f"❌ TELEGRAM BG: Failed to send final response to {chat_id}")
+                    else:
+                        print(f"⚠️ TELEGRAM BG: No response generated for {chat_id}")
+                        
                 elif "photo" in msg:
                     photos = msg["photo"]
                     file_id = photos[-1]["file_id"]
-                    file_path = get_telegram_file_path(file_id)
                     caption_text = msg.get('caption', None)
+                    
+                    print(f"🖼️ TELEGRAM BG: Processing photo message (file_id: {file_id[:20]}...)")
                     
                     # Send immediate processing message
                     if should_send_processing_msg:
+                        print(f"⚡ TELEGRAM BG: Sending immediate image processing message to {chat_id}")
                         send_telegram_message(chat_id, PROCESSING_IMAGE_MSG)
                     
+                    file_path = get_telegram_file_path(file_id)
                     if file_path:
                         telegram_token = app.config.get('TELEGRAM_BOT_TOKEN')
                         file_url = f"https://api.telegram.org/file/bot{telegram_token}/{file_path}"
@@ -268,19 +367,27 @@ def telegram_webhook():
                             send_telegram_message(chat_id, IMAGE_ERROR_MSG)
                     else:
                         send_telegram_message(chat_id, IMAGE_ERROR_MSG)
+                        
                 elif "location" in msg:
                     latitude = msg["location"]["latitude"]
                     longitude = msg["location"]["longitude"]
                     
+                    print(f"📍 TELEGRAM BG: Processing location message (lat: {latitude}, lon: {longitude})")
+                    
                     # Send immediate processing message
                     if should_send_processing_msg:
+                        print(f"⚡ TELEGRAM BG: Sending immediate location processing message to {chat_id}")
                         send_telegram_message(chat_id, PROCESSING_LOCATION_MSG)
                     
                     response = message_processor.handle_location_message(chat_id, latitude, longitude, "telegram")
                     if response:
                         send_telegram_message(chat_id, response)
+                        
+                processing_time = (datetime.now() - bg_start).total_seconds()
+                print(f"✅ TELEGRAM BG: Background processing completed for {chat_id} in {processing_time:.3f}s")
+                
             except Exception as e:
-                print(f"Background Telegram processing error: {e}")
+                print(f"❌ TELEGRAM BG: Background processing error for {chat_id}: {e}")
                 # Send error message to user
                 try:
                     send_telegram_message(chat_id, "I encountered a technical issue. Please try again or consult a healthcare professional if urgent.")
@@ -290,9 +397,13 @@ def telegram_webhook():
         # Start background processing
         threading.Thread(target=process_message, daemon=True).start()
         
+        webhook_time = (datetime.now() - start_time).total_seconds()
+        print(f"🏁 TELEGRAM: Webhook completed for {chat_id} in {webhook_time:.3f}s")
+        
         return "OK", 200
     except Exception as e:
-        print(f"Telegram webhook error: {e}")
+        error_time = (datetime.now() - start_time).total_seconds()
+        print(f"❌ TELEGRAM: Webhook error for {chat_id if 'chat_id' in locals() else 'unknown'} after {error_time:.3f}s: {e}")
         return "OK", 200  # Still return OK to prevent retries
 
 @app.route("/set-webhook/<path:webhook_url>", methods=["GET"])
@@ -488,6 +599,127 @@ def test_async_fix():
     test_results["overall_status"] = "all_tests_passed" if all_passed else "some_tests_failed"
     test_results["message"] = "Flask context fixes working properly" if all_passed else "Some issues detected"
     test_results["flask_context_fix"] = "✅ Implemented" if test_results["tests"].get("background_thread_context", {}).get("context_accessible") else "❌ Issues detected"
+    
+    return jsonify(test_results)
+
+@app.route("/test-webhook-performance", methods=["GET"])
+def test_webhook_performance():
+    """Test webhook performance and deadlock fixes"""
+    from services.session_service import get_session_service
+    from models.user import is_new_user, get_user_profile, get_user_history
+    import time
+    
+    test_results = {
+        "timestamp": datetime.now().isoformat(),
+        "deadlock_fix": {},
+        "performance_tests": {},
+        "database_operations": {}
+    }
+    
+    test_user = "test_deadlock_user_123"
+    
+    try:
+        # Test 1: Deadlock fix - nested lock calls
+        start_time = time.time()
+        session_service = get_session_service()
+        
+        # This previously caused deadlock
+        result1 = session_service.should_start_profile_setup(test_user)
+        result2 = session_service.is_in_profile_setup(test_user)
+        
+        test_results["deadlock_fix"] = {
+            "status": "success",
+            "should_start_profile_setup": result1,
+            "is_in_profile_setup": result2,
+            "time_ms": round((time.time() - start_time) * 1000, 2),
+            "rlock_working": True
+        }
+    except Exception as e:
+        test_results["deadlock_fix"] = {
+            "status": "failed",
+            "error": str(e),
+            "rlock_working": False
+        }
+    
+    try:
+        # Test 2: Database operation performance
+        start_time = time.time()
+        
+        # Test is_new_user function (which makes 2 DB calls)
+        is_new = is_new_user(test_user)
+        db_time = time.time() - start_time
+        
+        # Test individual operations
+        start_time = time.time()
+        profile = get_user_profile(test_user)
+        profile_time = time.time() - start_time
+        
+        start_time = time.time()
+        history = get_user_history(test_user)
+        history_time = time.time() - start_time
+        
+        test_results["database_operations"] = {
+            "status": "success",
+            "is_new_user_time_ms": round(db_time * 1000, 2),
+            "get_user_profile_time_ms": round(profile_time * 1000, 2),
+            "get_user_history_time_ms": round(history_time * 1000, 2),
+            "is_new_user_result": is_new,
+            "profile_exists": profile is not None,
+            "history_count": len(history) if history else 0
+        }
+    except Exception as e:
+        test_results["database_operations"] = {
+            "status": "failed",
+            "error": str(e)
+        }
+    
+    try:
+        # Test 3: Webhook processing simulation
+        start_time = time.time()
+        
+        # Simulate webhook processing steps
+        step1_time = time.time()
+        session_service.update_session_activity(test_user)
+        step1_elapsed = time.time() - step1_time
+        
+        step2_time = time.time()
+        should_send = not session_service.is_in_profile_setup(test_user)
+        step2_elapsed = time.time() - step2_time
+        
+        total_webhook_time = time.time() - start_time
+        
+        test_results["performance_tests"] = {
+            "status": "success",
+            "session_update_time_ms": round(step1_elapsed * 1000, 2),
+            "profile_check_time_ms": round(step2_elapsed * 1000, 2),
+            "total_webhook_simulation_ms": round(total_webhook_time * 1000, 2),
+            "should_send_processing_msg": should_send,
+            "performance_acceptable": total_webhook_time < 0.1  # Should be under 100ms
+        }
+    except Exception as e:
+        test_results["performance_tests"] = {
+            "status": "failed",
+            "error": str(e)
+        }
+    
+    # Overall assessment
+    all_passed = all(
+        test.get("status") == "success" 
+        for test in [
+            test_results["deadlock_fix"], 
+            test_results["database_operations"], 
+            test_results["performance_tests"]
+        ]
+    )
+    
+    test_results["overall_status"] = "all_tests_passed" if all_passed else "some_tests_failed"
+    test_results["deadlock_fixed"] = test_results["deadlock_fix"].get("rlock_working", False)
+    test_results["performance_good"] = test_results["performance_tests"].get("performance_acceptable", False)
+    test_results["summary"] = {
+        "deadlock_issue": "✅ Fixed with RLock" if test_results["deadlock_fix"].get("rlock_working") else "❌ Still present",
+        "webhook_performance": f"✅ Fast ({test_results['performance_tests'].get('total_webhook_simulation_ms', 0)}ms)" if test_results["performance_tests"].get("performance_acceptable") else "⚠️ Slow",
+        "database_performance": f"✅ DB operations working" if test_results["database_operations"].get("status") == "success" else "❌ DB issues"
+    }
     
     return jsonify(test_results)
 

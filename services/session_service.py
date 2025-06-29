@@ -15,13 +15,13 @@ class SessionService:
     - Multi-platform support (WhatsApp/Telegram)
     - Activity tracking and cleanup
     - Agent state persistence
-    - Thread-safe duplicate prevention
+    - Thread-safe duplicate prevention with reentrant locks
     """
     def __init__(self):
         """Initialize session storage with thread safety"""
         self.user_sessions = {}
         self.profile_setup_sessions = {}
-        self._lock = threading.Lock()  # Thread safety for profile setup
+        self._lock = threading.RLock()  # DEADLOCK FIX: Use RLock (reentrant) instead of Lock
     def get_session(self, user_id):
         """Get or create user session"""
         if user_id not in self.user_sessions:
