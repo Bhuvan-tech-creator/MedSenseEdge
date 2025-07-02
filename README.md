@@ -1,3 +1,6 @@
+Bhuvan Prashanth and Andrei Saramukov -- University High School -- 6/29/25 -- Category: Health and Wellness -- Project Name: MedSense -- Description: A telegram and whatsapp bot that helps users with low connectivity and users that speak a variety of languages diagnose themselves with the help of Gemini and PubMed (a medical database). 
+
+
 # MedSense Bot
 The first medical bot to access real-time medical data from the web, and provide support to the user without requiring a frontend. 
 
