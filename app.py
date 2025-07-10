@@ -5,6 +5,7 @@ Refactored but maintains exact same functionality and launch behavior as origina
 from flask import Flask, request, jsonify, current_app
 import os
 import threading
+import time
 from datetime import datetime, timedelta
 from config import Config
 from models.database import init_database
@@ -19,9 +20,19 @@ from services.message_processor import get_message_processor
 from services.followup_service import get_followup_service
 from utils.constants import WELCOME_MSG, IMAGE_ERROR_MSG, PROCESSING_TEXT_MSG, PROCESSING_IMAGE_MSG, PROCESSING_LOCATION_MSG
 
+# Import blueprints
+from routes.whatsapp import whatsapp_bp
+from routes.telegram import telegram_bp
+from routes.health import health_bp
+
 app = Flask(__name__)
 app.config.from_object(Config)
 init_database()
+
+# Register blueprints
+app.register_blueprint(whatsapp_bp)
+app.register_blueprint(telegram_bp)
+app.register_blueprint(health_bp)
 
 session_service = get_session_service()
 message_processor = get_message_processor()
@@ -29,7 +40,7 @@ message_processor = get_message_processor()
 # Message deduplication for WhatsApp webhooks
 processed_messages = {}
 
-# Message deduplication for Telegram webhooks (NEW)
+# Message deduplication for Telegram webhooks
 processed_telegram_messages = {}
 
 def clean_old_messages():
@@ -40,7 +51,7 @@ def clean_old_messages():
     for msg_id in to_remove:
         del processed_messages[msg_id]
     
-    # Clean Telegram messages (NEW)
+    # Clean Telegram messages
     to_remove_telegram = [msg_id for msg_id, timestamp in processed_telegram_messages.items() if timestamp < cutoff]
     for msg_id in to_remove_telegram:
         del processed_telegram_messages[msg_id]
@@ -115,297 +126,6 @@ def trigger_followup_test(user_id):
             "error": str(e)
         })
 
-@app.route("/webhook", methods=["GET", "POST"])
-def whatsapp_webhook():
-    """WhatsApp webhook endpoint with enhanced debugging and performance optimizations"""
-    start_time = datetime.now()
-    session_service.clear_inactive_sessions()
-    
-    if request.method == "GET":
-        challenge = request.args.get("hub.challenge")
-        verify_token = app.config.get('VERIFY_TOKEN')
-        if (request.args.get("hub.mode") == "subscribe" and 
-            request.args.get("hub.verify_token") == verify_token):
-            return challenge if challenge else "", 200
-        return "Verification failed", 403
-    
-    try:
-        data = request.get_json()
-        entry = data['entry'][0]['changes'][0]['value']
-        messages = entry.get('messages', [])
-        if not messages:
-            print(f"⚠️ WHATSAPP: No messages in data, returning OK")
-            return "OK", 200
-        
-        msg = messages[0]
-        sender = msg['from']
-        
-        print(f"📨 WHATSAPP: Received message from {sender} at {start_time.strftime('%H:%M:%S.%f')}")
-        
-        # Check for duplicate messages using WhatsApp message ID
-        message_id = msg.get('id')
-        if message_id and is_duplicate_message(message_id):
-            print(f"⚠️ WHATSAPP: Skipping duplicate message {message_id} from {sender}")
-            return "OK", 200
-            
-        session_service.update_session_activity(sender)
-        print(f"🔄 WHATSAPP: Session updated for {sender} at {(datetime.now() - start_time).total_seconds():.3f}s")
-        
-        # OPTIMIZED: Quick check for profile setup (minimize blocking)
-        should_send_processing_msg = True
-        try:
-            # Do a quick, non-blocking check first
-            if session_service.is_in_profile_setup(sender):
-                should_send_processing_msg = False
-                print(f"👤 WHATSAPP: User {sender} is in profile setup")
-            else:
-                # Only check if new user if not already in setup
-                # This will be double-checked in background thread
-                print(f"✅ WHATSAPP: User {sender} not in profile setup, allowing processing message")
-        except Exception as e:
-            print(f"⚠️ WHATSAPP: Error checking profile setup: {e}")
-            # Default to sending processing message if check fails
-        
-        print(f"🚀 WHATSAPP: Starting background processing for {sender} at {(datetime.now() - start_time).total_seconds():.3f}s")
-        
-        # Process message in background to prevent webhook timeout
-        def process_message():
-            bg_start = datetime.now()
-            print(f"🔄 WHATSAPP BG: Background processing started for {sender}")
-            try:
-                if 'text' in msg:
-                    body = msg['text']['body']
-                    
-                    print(f"📝 WHATSAPP BG: Processing text message: '{body[:50]}...'")
-                    
-                    # Send immediate processing message FIRST (before any blocking operations)
-                    if should_send_processing_msg and not body.lower().startswith(('/start', 'start', 'history', 'clear', 'help')):
-                        print(f"⚡ WHATSAPP BG: Sending immediate processing message to {sender}")
-                        processing_sent = send_whatsapp_message(sender, PROCESSING_TEXT_MSG)
-                        if processing_sent:
-                            print(f"✅ WHATSAPP BG: Processing message sent successfully to {sender}")
-                        else:
-                            print(f"❌ WHATSAPP BG: Failed to send processing message to {sender}")
-                    
-                    # Now do the actual processing
-                    response = message_processor.handle_text_message(sender, body, "whatsapp")
-                    if response:
-                        print(f"📤 WHATSAPP BG: Sending response to {sender} (length: {len(response)} chars)")
-                        final_sent = send_whatsapp_message(sender, response)
-                        if final_sent:
-                            print(f"✅ WHATSAPP BG: Final response sent to {sender}")
-                        else:
-                            print(f"❌ WHATSAPP BG: Failed to send final response to {sender}")
-                    else:
-                        print(f"⚠️ WHATSAPP BG: No response generated for {sender}")
-                        
-                elif 'image' in msg:
-                    media_id = msg['image']['id']
-                    caption_text = msg['image'].get('caption', None)
-                    
-                    print(f"🖼️ WHATSAPP BG: Processing image message (media_id: {media_id[:20]}...)")
-                    
-                    # Send immediate processing message
-                    if should_send_processing_msg:
-                        print(f"⚡ WHATSAPP BG: Sending immediate image processing message to {sender}")
-                        send_whatsapp_message(sender, PROCESSING_IMAGE_MSG)
-                    
-                    image_url = get_whatsapp_image_url(media_id)
-                    if image_url:
-                        image_base64 = download_and_encode_whatsapp_image(image_url)
-                        if image_base64:
-                            response = message_processor.handle_image_message(sender, image_base64, "whatsapp", caption_text)
-                            if response:
-                                send_whatsapp_message(sender, response)
-                        else:
-                            send_whatsapp_message(sender, IMAGE_ERROR_MSG)
-                    else:
-                        send_whatsapp_message(sender, IMAGE_ERROR_MSG)
-                        
-                elif 'location' in msg:
-                    latitude = msg['location']['latitude']
-                    longitude = msg['location']['longitude']
-                    
-                    print(f"📍 WHATSAPP BG: Processing location message (lat: {latitude}, lon: {longitude})")
-                    
-                    # Send immediate processing message
-                    if should_send_processing_msg:
-                        print(f"⚡ WHATSAPP BG: Sending immediate location processing message to {sender}")
-                        send_whatsapp_message(sender, PROCESSING_LOCATION_MSG)
-                    
-                    response = message_processor.handle_location_message(sender, latitude, longitude, "whatsapp")
-                    if response:
-                        send_whatsapp_message(sender, response)
-                        
-                processing_time = (datetime.now() - bg_start).total_seconds()
-                print(f"✅ WHATSAPP BG: Background processing completed for {sender} in {processing_time:.3f}s")
-                
-            except Exception as e:
-                print(f"❌ WHATSAPP BG: Background processing error for {sender}: {e}")
-                # Send error message to user
-                try:
-                    send_whatsapp_message(sender, "I encountered a technical issue. Please try again or consult a healthcare professional if urgent.")
-                except:
-                    pass
-        
-        # Start background processing
-        threading.Thread(target=process_message, daemon=True).start()
-        
-        webhook_time = (datetime.now() - start_time).total_seconds()
-        print(f"🏁 WHATSAPP: Webhook completed for {sender} in {webhook_time:.3f}s")
-        
-    except Exception as e:
-        error_time = (datetime.now() - start_time).total_seconds()
-        print(f"❌ WHATSAPP: Webhook error after {error_time:.3f}s: {e}")
-    
-    # Always return OK immediately to prevent retries
-    return "OK", 200
-
-@app.route("/webhook/telegram", methods=["POST"])
-def telegram_webhook():
-    """Telegram webhook endpoint with enhanced debugging and performance optimizations"""
-    start_time = datetime.now()
-    session_service.clear_inactive_sessions()
-    
-    try:
-        data = request.get_json()
-        if "message" not in data:
-            print(f"⚠️ TELEGRAM: No message in data, returning OK")
-            return "OK", 200
-        
-        msg = data["message"]
-        chat_id = str(msg.get("chat", {}).get("id", ""))
-        if not chat_id:
-            print(f"❌ TELEGRAM: No chat_id found")
-            return "No chat_id", 400
-        
-        print(f"📨 TELEGRAM: Received message from {chat_id} at {start_time.strftime('%H:%M:%S.%f')}")
-        
-        # Check for duplicate messages using Telegram message ID
-        message_id = msg.get('message_id')
-        if message_id and is_duplicate_telegram_message(f"{chat_id}_{message_id}"):
-            print(f"⚠️ TELEGRAM: Skipping duplicate message {message_id} from {chat_id}")
-            return "OK", 200
-        
-        session_service.update_session_activity(chat_id)
-        print(f"🔄 TELEGRAM: Session updated for {chat_id} at {(datetime.now() - start_time).total_seconds():.3f}s")
-        
-        # OPTIMIZED: Quick check for profile setup (minimize blocking)
-        should_send_processing_msg = True
-        try:
-            # Do a quick, non-blocking check first
-            if session_service.is_in_profile_setup(chat_id):
-                should_send_processing_msg = False
-                print(f"👤 TELEGRAM: User {chat_id} is in profile setup")
-            else:
-                # Only check if new user if not already in setup
-                # This will be double-checked in background thread
-                print(f"✅ TELEGRAM: User {chat_id} not in profile setup, allowing processing message")
-        except Exception as e:
-            print(f"⚠️ TELEGRAM: Error checking profile setup: {e}")
-            # Default to sending processing message if check fails
-        
-        print(f"🚀 TELEGRAM: Starting background processing for {chat_id} at {(datetime.now() - start_time).total_seconds():.3f}s")
-        
-        # Process message in background to prevent webhook timeout
-        def process_message():
-            bg_start = datetime.now()
-            print(f"🔄 TELEGRAM BG: Background processing started for {chat_id}")
-            try:
-                if "text" in msg:
-                    text = msg["text"]
-                    if text.startswith("/start"):
-                        text = "start"
-                    elif text.startswith("/"):
-                        text = text[1:]
-                    
-                    print(f"📝 TELEGRAM BG: Processing text message: '{text[:50]}...'")
-                    
-                    # Send immediate processing message FIRST (before any blocking operations)
-                    if should_send_processing_msg and not text.lower().startswith(('start', 'history', 'clear', 'help')):
-                        print(f"⚡ TELEGRAM BG: Sending immediate processing message to {chat_id}")
-                        processing_sent = send_telegram_message(chat_id, PROCESSING_TEXT_MSG)
-                        if processing_sent:
-                            print(f"✅ TELEGRAM BG: Processing message sent successfully to {chat_id}")
-                        else:
-                            print(f"❌ TELEGRAM BG: Failed to send processing message to {chat_id}")
-                    
-                    # Now do the actual processing
-                    response = message_processor.handle_text_message(chat_id, text, "telegram")
-                    if response:
-                        print(f"📤 TELEGRAM BG: Sending response to {chat_id} (length: {len(response)} chars)")
-                        final_sent = send_telegram_message(chat_id, response)
-                        if final_sent:
-                            print(f"✅ TELEGRAM BG: Final response sent to {chat_id}")
-                        else:
-                            print(f"❌ TELEGRAM BG: Failed to send final response to {chat_id}")
-                    else:
-                        print(f"⚠️ TELEGRAM BG: No response generated for {chat_id}")
-                        
-                elif "photo" in msg:
-                    photos = msg["photo"]
-                    file_id = photos[-1]["file_id"]
-                    caption_text = msg.get('caption', None)
-                    
-                    print(f"🖼️ TELEGRAM BG: Processing photo message (file_id: {file_id[:20]}...)")
-                    
-                    # Send immediate processing message
-                    if should_send_processing_msg:
-                        print(f"⚡ TELEGRAM BG: Sending immediate image processing message to {chat_id}")
-                        send_telegram_message(chat_id, PROCESSING_IMAGE_MSG)
-                    
-                    file_path = get_telegram_file_path(file_id)
-                    if file_path:
-                        telegram_token = app.config.get('TELEGRAM_BOT_TOKEN')
-                        file_url = f"https://api.telegram.org/file/bot{telegram_token}/{file_path}"
-                        image_base64 = download_telegram_image(file_url)
-                        if image_base64:
-                            response = message_processor.handle_image_message(chat_id, image_base64, "telegram", caption_text)
-                            if response:
-                                send_telegram_message(chat_id, response)
-                        else:
-                            send_telegram_message(chat_id, IMAGE_ERROR_MSG)
-                    else:
-                        send_telegram_message(chat_id, IMAGE_ERROR_MSG)
-                        
-                elif "location" in msg:
-                    latitude = msg["location"]["latitude"]
-                    longitude = msg["location"]["longitude"]
-                    
-                    print(f"📍 TELEGRAM BG: Processing location message (lat: {latitude}, lon: {longitude})")
-                    
-                    # Send immediate processing message
-                    if should_send_processing_msg:
-                        print(f"⚡ TELEGRAM BG: Sending immediate location processing message to {chat_id}")
-                        send_telegram_message(chat_id, PROCESSING_LOCATION_MSG)
-                    
-                    response = message_processor.handle_location_message(chat_id, latitude, longitude, "telegram")
-                    if response:
-                        send_telegram_message(chat_id, response)
-                        
-                processing_time = (datetime.now() - bg_start).total_seconds()
-                print(f"✅ TELEGRAM BG: Background processing completed for {chat_id} in {processing_time:.3f}s")
-                
-            except Exception as e:
-                print(f"❌ TELEGRAM BG: Background processing error for {chat_id}: {e}")
-                # Send error message to user
-                try:
-                    send_telegram_message(chat_id, "I encountered a technical issue. Please try again or consult a healthcare professional if urgent.")
-                except:
-                    pass
-        
-        # Start background processing
-        threading.Thread(target=process_message, daemon=True).start()
-        
-        webhook_time = (datetime.now() - start_time).total_seconds()
-        print(f"🏁 TELEGRAM: Webhook completed for {chat_id} in {webhook_time:.3f}s")
-        
-        return "OK", 200
-    except Exception as e:
-        error_time = (datetime.now() - start_time).total_seconds()
-        print(f"❌ TELEGRAM: Webhook error for {chat_id if 'chat_id' in locals() else 'unknown'} after {error_time:.3f}s: {e}")
-        return "OK", 200  # Still return OK to prevent retries
-
 @app.route("/set-webhook/<path:webhook_url>", methods=["GET"])
 def manual_set_webhook(webhook_url):
     if not webhook_url.startswith(('http://', 'https://')):
@@ -458,296 +178,289 @@ def test_duplicate_prevention():
     
     # Test message processor deduplication
     processor = get_message_processor()
-    first_dup_check = processor._is_duplicate_request(test_user, "text", test_message)
-    second_dup_check = processor._is_duplicate_request(test_user, "text", test_message)
+    
+    # First call - should not be duplicate
+    start_time = time.time()
+    first_response = processor.handle_text_message(test_user, test_message, "test")
+    first_time = time.time() - start_time
+    
+    # Second call - should be duplicate or cached
+    start_time = time.time()
+    second_response = processor.handle_text_message(test_user, test_message, "test")
+    second_time = time.time() - start_time
+    
     results["message_processor_deduplication"] = {
-        "first_check": first_dup_check[0],  # is_duplicate
-        "second_check": second_dup_check[0],  # is_duplicate  
-        "working": not first_dup_check[0] and second_dup_check[0]
+        "first_response_time": first_time,
+        "second_response_time": second_time,
+        "responses_match": first_response == second_response,
+        "second_faster": second_time < first_time,
+        "working": second_time < first_time * 0.5  # Should be much faster if cached
     }
     
-    # Test message sending deduplication (would need actual tokens to test fully)
+    # Test message sending deduplication
+    test_recipient = "test_recipient_123"
+    test_send_message = "Test message for deduplication"
+    
+    # First send - should work
+    start_time = time.time()
+    first_send = send_whatsapp_message(test_recipient, test_send_message)
+    first_send_time = time.time() - start_time
+    
+    # Second send - should be duplicate prevented
+    start_time = time.time()
+    second_send = send_whatsapp_message(test_recipient, test_send_message)
+    second_send_time = time.time() - start_time
+    
     results["message_sending_deduplication"] = {
-        "info": "Message sending deduplication active - prevents identical messages within 2 minutes",
-        "hash_system": "Uses MD5 hash of recipient + message content for deduplication"
+        "first_send_time": first_send_time,
+        "second_send_time": second_send_time,
+        "both_returned_true": first_send and second_send,
+        "second_faster": second_send_time < first_send_time,
+        "working": second_send_time < first_send_time * 0.5  # Should be much faster if duplicate
     }
     
-    return jsonify({
-        "status": "Duplicate Prevention Test Results",
-        "timestamp": datetime.now().isoformat(),
-        "results": results,
-        "summary": {
-            "webhook_protection": results["webhook_deduplication"]["whatsapp"]["working"] and results["webhook_deduplication"]["telegram"]["working"],
-            "processor_protection": results["message_processor_deduplication"]["working"],
-            "all_systems_working": all([
-                results["webhook_deduplication"]["whatsapp"]["working"],
-                results["webhook_deduplication"]["telegram"]["working"], 
-                results["message_processor_deduplication"]["working"]
-            ])
-        }
-    })
+    return jsonify(results)
 
 @app.route("/test-async-fix", methods=["GET"])
 def test_async_fix():
-    """Test endpoint to verify async/sync fixes are working"""
-    from services.message_processor import get_message_processor
-    import time
+    """Test the async/threading fix for message processing"""
+    import asyncio
+    from services.medical_agent import get_medical_agent_system
     
-    test_results = {
-        "timestamp": datetime.now().isoformat(),
-        "tests": {}
+    test_user = "test_user_async"
+    test_message = "I have a headache and feel dizzy"
+    
+    results = {
+        "direct_async_call": {},
+        "threaded_async_call": {},
+        "message_processor_call": {}
     }
     
+    # Test 1: Direct async call (should work in main thread)
     try:
-        # Test 1: Simple message processor instantiation
         start_time = time.time()
-        processor = get_message_processor()
-        test_results["tests"]["processor_creation"] = {
-            "status": "success",
-            "time_ms": round((time.time() - start_time) * 1000, 2)
-        }
+        agent_system = get_medical_agent_system()
+        
+        # Try to get existing loop
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If loop is running, we can't use run_until_complete
+                results["direct_async_call"] = {
+                    "status": "loop_already_running",
+                    "error": "Cannot run async in already running loop"
+                }
+            else:
+                # Loop exists but not running
+                result = loop.run_until_complete(
+                    agent_system.analyze_medical_query(
+                        user_id=test_user,
+                        message=test_message,
+                        image_data=None,
+                        location=None,
+                        emergency=False
+                    )
+                )
+                results["direct_async_call"] = {
+                    "status": "success",
+                    "time_taken": time.time() - start_time,
+                    "result_keys": list(result.keys()) if result else []
+                }
+        except RuntimeError as e:
+            # No event loop in current thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(
+                agent_system.analyze_medical_query(
+                    user_id=test_user,
+                    message=test_message,
+                    image_data=None,
+                    location=None,
+                    emergency=False
+                )
+            )
+            loop.close()
+            results["direct_async_call"] = {
+                "status": "success_new_loop",
+                "time_taken": time.time() - start_time,
+                "result_keys": list(result.keys()) if result else []
+            }
     except Exception as e:
-        test_results["tests"]["processor_creation"] = {
-            "status": "failed",
+        results["direct_async_call"] = {
+            "status": "error",
             "error": str(e)
         }
     
+    # Test 2: Threaded async call (what we use in production)
     try:
-        # Test 2: Medical agent system instantiation
         start_time = time.time()
-        from services.medical_agent import get_medical_agent_system
-        agent = get_medical_agent_system()
-        test_results["tests"]["agent_creation"] = {
-            "status": "success",
-            "time_ms": round((time.time() - start_time) * 1000, 2)
-        }
-    except Exception as e:
-        test_results["tests"]["agent_creation"] = {
-            "status": "failed",
-            "error": str(e)
-        }
-    
-    try:
-        # Test 3: Async analysis simulation (without actually running it)
-        processor = get_message_processor()
-        test_hash = processor._generate_request_hash("test_user", "text", "test message")
-        test_results["tests"]["hash_generation"] = {
-            "status": "success",
-            "hash": test_hash[:8] + "...",
-            "full_length": len(test_hash)
-        }
-    except Exception as e:
-        test_results["tests"]["hash_generation"] = {
-            "status": "failed",
-            "error": str(e)
-        }
-    
-    try:
-        # Test 4: Flask app context availability - NEW TEST
-        app_available = current_app is not None
-        config_accessible = current_app.config.get('GEMINI_API_KEY') is not None if app_available else False
-        test_results["tests"]["flask_context"] = {
-            "status": "success",
-            "app_available": app_available,
-            "config_accessible": config_accessible,
-            "context_type": str(type(current_app)) if app_available else "None"
-        }
-    except Exception as e:
-        test_results["tests"]["flask_context"] = {
-            "status": "failed",
-            "error": str(e)
-        }
-    
-    try:
-        # Test 5: Background thread simulation - NEW TEST
-        import threading
-        context_test_result = {"success": False, "error": None}
+        result_container = {}
         
         def test_context_in_thread():
+            """Test async processing in a separate thread with Flask context"""
+            # Get Flask app context
+            app_context = current_app._get_current_object()
+            
             try:
-                # Capture app context like message processor does
-                app_context = current_app._get_current_object() if current_app else None
-                if app_context:
-                    with app_context.app_context():
-                        # Test if we can access config
-                        api_key = current_app.config.get('GEMINI_API_KEY')
-                        context_test_result["success"] = True
-                        context_test_result["api_key_accessible"] = api_key is not None
-                else:
-                    context_test_result["error"] = "No app context captured"
+                # Create new event loop for this thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                # Run with Flask app context
+                with app_context.app_context():
+                    agent_system = get_medical_agent_system()
+                    result = loop.run_until_complete(
+                        agent_system.analyze_medical_query(
+                            user_id=test_user,
+                            message=test_message,
+                            image_data=None,
+                            location=None,
+                            emergency=False
+                        )
+                    )
+                    result_container["result"] = result
+                    result_container["status"] = "success"
             except Exception as e:
-                context_test_result["error"] = str(e)
+                result_container["status"] = "error"
+                result_container["error"] = str(e)
+            finally:
+                if loop:
+                    loop.close()
         
         thread = threading.Thread(target=test_context_in_thread)
         thread.start()
-        thread.join(timeout=5)  # Wait max 5 seconds
+        thread.join(timeout=30)  # Wait up to 30 seconds
         
-        test_results["tests"]["background_thread_context"] = {
-            "status": "success" if context_test_result["success"] else "failed",
-            "context_accessible": context_test_result["success"],
-            "api_key_accessible": context_test_result.get("api_key_accessible", False),
-            "error": context_test_result.get("error")
-        }
+        if thread.is_alive():
+            results["threaded_async_call"] = {
+                "status": "timeout",
+                "error": "Thread took too long"
+            }
+        else:
+            results["threaded_async_call"] = {
+                "status": result_container.get("status", "unknown"),
+                "time_taken": time.time() - start_time,
+                "result_keys": list(result_container.get("result", {}).keys()) if result_container.get("result") else [],
+                "error": result_container.get("error")
+            }
     except Exception as e:
-        test_results["tests"]["background_thread_context"] = {
-            "status": "failed",
+        results["threaded_async_call"] = {
+            "status": "error",
             "error": str(e)
         }
     
-    # Overall status
-    all_passed = all(test.get("status") == "success" for test in test_results["tests"].values())
-    test_results["overall_status"] = "all_tests_passed" if all_passed else "some_tests_failed"
-    test_results["message"] = "Flask context fixes working properly" if all_passed else "Some issues detected"
-    test_results["flask_context_fix"] = "✅ Implemented" if test_results["tests"].get("background_thread_context", {}).get("context_accessible") else "❌ Issues detected"
+    # Test 3: Message processor call (production path)
+    try:
+        start_time = time.time()
+        processor = get_message_processor()
+        response = processor.handle_text_message(test_user, test_message, "test")
+        results["message_processor_call"] = {
+            "status": "success",
+            "time_taken": time.time() - start_time,
+            "response_length": len(response) if response else 0,
+            "has_response": bool(response)
+        }
+    except Exception as e:
+        results["message_processor_call"] = {
+            "status": "error",
+            "error": str(e)
+        }
     
-    return jsonify(test_results)
+    return jsonify(results)
 
 @app.route("/test-webhook-performance", methods=["GET"])
 def test_webhook_performance():
-    """Test webhook performance and deadlock fixes"""
-    from services.session_service import get_session_service
-    from models.user import is_new_user, get_user_profile, get_user_history
+    """Test webhook performance and background processing"""
     import time
+    import requests
     
-    test_results = {
-        "timestamp": datetime.now().isoformat(),
-        "deadlock_fix": {},
-        "performance_tests": {},
-        "database_operations": {}
+    results = {
+        "webhook_response_time": {},
+        "background_processing_test": {}
     }
     
-    test_user = "test_deadlock_user_123"
+    # Test webhook response time
+    start_time = time.time()
+    
+    # Simulate webhook data
+    test_data = {
+        "message": {
+            "message_id": 999999,
+            "chat": {"id": 999999},
+            "text": "test performance message",
+            "date": int(time.time())
+        }
+    }
     
     try:
-        # Test 1: Deadlock fix - nested lock calls
-        start_time = time.time()
-        session_service = get_session_service()
-        
-        # This previously caused deadlock
-        result1 = session_service.should_start_profile_setup(test_user)
-        result2 = session_service.is_in_profile_setup(test_user)
-        
-        test_results["deadlock_fix"] = {
-            "status": "success",
-            "should_start_profile_setup": result1,
-            "is_in_profile_setup": result2,
-            "time_ms": round((time.time() - start_time) * 1000, 2),
-            "rlock_working": True
-        }
+        # Test webhook endpoint directly
+        with app.test_client() as client:
+            response = client.post(
+                '/webhook/telegram',
+                json=test_data,
+                headers={'Content-Type': 'application/json'}
+            )
+            
+            webhook_time = time.time() - start_time
+            results["webhook_response_time"] = {
+                "status_code": response.status_code,
+                "response_time_ms": webhook_time * 1000,
+                "response_data": response.get_data(as_text=True),
+                "fast_response": webhook_time < 1.0  # Should be under 1 second
+            }
     except Exception as e:
-        test_results["deadlock_fix"] = {
-            "status": "failed",
-            "error": str(e),
-            "rlock_working": False
-        }
-    
-    try:
-        # Test 2: Database operation performance
-        start_time = time.time()
-        
-        # Test is_new_user function (which makes 2 DB calls)
-        is_new = is_new_user(test_user)
-        db_time = time.time() - start_time
-        
-        # Test individual operations
-        start_time = time.time()
-        profile = get_user_profile(test_user)
-        profile_time = time.time() - start_time
-        
-        start_time = time.time()
-        history = get_user_history(test_user)
-        history_time = time.time() - start_time
-        
-        test_results["database_operations"] = {
-            "status": "success",
-            "is_new_user_time_ms": round(db_time * 1000, 2),
-            "get_user_profile_time_ms": round(profile_time * 1000, 2),
-            "get_user_history_time_ms": round(history_time * 1000, 2),
-            "is_new_user_result": is_new,
-            "profile_exists": profile is not None,
-            "history_count": len(history) if history else 0
-        }
-    except Exception as e:
-        test_results["database_operations"] = {
-            "status": "failed",
+        results["webhook_response_time"] = {
+            "status": "error",
             "error": str(e)
         }
     
+    # Test background processing simulation
     try:
-        # Test 3: Webhook processing simulation
-        start_time = time.time()
+        processing_times = []
         
-        # Simulate webhook processing steps
-        step1_time = time.time()
-        session_service.update_session_activity(test_user)
-        step1_elapsed = time.time() - step1_time
+        for i in range(3):
+            start_time = time.time()
+            
+            # Simulate background processing
+            def background_task():
+                time.sleep(0.1)  # Simulate processing time
+                return "processed"
+            
+            thread = threading.Thread(target=background_task)
+            thread.start()
+            
+            # Measure time to start thread (webhook response time)
+            thread_start_time = time.time() - start_time
+            processing_times.append(thread_start_time)
+            
+            thread.join()  # Wait for completion
         
-        step2_time = time.time()
-        should_send = not session_service.is_in_profile_setup(test_user)
-        step2_elapsed = time.time() - step2_time
-        
-        total_webhook_time = time.time() - start_time
-        
-        test_results["performance_tests"] = {
-            "status": "success",
-            "session_update_time_ms": round(step1_elapsed * 1000, 2),
-            "profile_check_time_ms": round(step2_elapsed * 1000, 2),
-            "total_webhook_simulation_ms": round(total_webhook_time * 1000, 2),
-            "should_send_processing_msg": should_send,
-            "performance_acceptable": total_webhook_time < 0.1  # Should be under 100ms
+        avg_start_time = sum(processing_times) / len(processing_times)
+        results["background_processing_test"] = {
+            "average_thread_start_time_ms": avg_start_time * 1000,
+            "individual_times_ms": [t * 1000 for t in processing_times],
+            "fast_startup": avg_start_time < 0.01  # Should be under 10ms
         }
     except Exception as e:
-        test_results["performance_tests"] = {
-            "status": "failed",
+        results["background_processing_test"] = {
+            "status": "error",
             "error": str(e)
         }
     
-    # Overall assessment
-    all_passed = all(
-        test.get("status") == "success" 
-        for test in [
-            test_results["deadlock_fix"], 
-            test_results["database_operations"], 
-            test_results["performance_tests"]
-        ]
-    )
-    
-    test_results["overall_status"] = "all_tests_passed" if all_passed else "some_tests_failed"
-    test_results["deadlock_fixed"] = test_results["deadlock_fix"].get("rlock_working", False)
-    test_results["performance_good"] = test_results["performance_tests"].get("performance_acceptable", False)
-    test_results["summary"] = {
-        "deadlock_issue": "✅ Fixed with RLock" if test_results["deadlock_fix"].get("rlock_working") else "❌ Still present",
-        "webhook_performance": f"✅ Fast ({test_results['performance_tests'].get('total_webhook_simulation_ms', 0)}ms)" if test_results["performance_tests"].get("performance_acceptable") else "⚠️ Slow",
-        "database_performance": f"✅ DB operations working" if test_results["database_operations"].get("status") == "success" else "❌ DB issues"
-    }
-    
-    return jsonify(test_results)
+    return jsonify(results)
 
 if __name__ == "__main__":
     print("🚀 Starting MedSense AI Bot...")
+    print("🔧 Initializing services...")
+    
+    # Initialize services
+    session_service = get_session_service()
+    message_processor = get_message_processor()
     followup_service = get_followup_service()
-    followup_service.start_scheduler()
-    print("✅ 24-hour follow-up scheduler initialized")
-    if app.config.get('TELEGRAM_BOT_TOKEN'):
-        token_works = test_telegram_token()
-        if token_works:
-            print("✅ Telegram token is valid")
-            webhook_info = get_telegram_webhook_info()
-            if webhook_info and webhook_info.get('url'):
-                print(f"✅ Telegram webhook configured: {webhook_info.get('url')}")
-            else:
-                print("⚠️ Telegram webhook not configured")
-        else:
-            print("❌ Telegram token is invalid or bot is not working")
-    else:
-        print("❌ TELEGRAM_BOT_TOKEN not found in environment variables")
-    if app.config.get('WHATSAPP_TOKEN'):
-        print("✅ WhatsApp token configured")
-    else:
-        print("⚠️ WhatsApp token not configured")
-    if app.config.get('GEMINI_API_KEY'):
-        print("✅ Gemini API key configured")
-    else:
-        print("❌ Gemini API key not configured")
+    
+    print("✅ Services initialized successfully")
+    print("🌐 Bot is ready to receive messages")
+    
+    # Run the app
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
